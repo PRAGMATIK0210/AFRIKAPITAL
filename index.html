@@ -188,10 +188,28 @@ input:focus,select:focus,textarea:focus{border-color:var(--primary);box-shadow:0
   .sidebar{position:fixed;left:0;top:0;bottom:0;width:250px;z-index:60;transform:translateX(-100%);transition:.2s}
   .sidebar.open{transform:none}
   .hamb{display:inline-flex}
-  .kpis{grid-template-columns:repeat(2,1fr)}
-  .split{grid-template-columns:1fr}
-  .row2,.row3{grid-template-columns:1fr}
+  .kpis{grid-template-columns:repeat(2,1fr)!important}
+  .split{grid-template-columns:1fr!important}
+  .row2,.row3{grid-template-columns:1fr!important}
   .grid-days{grid-template-columns:repeat(7,1fr)}
+  .kpi .val{font-size:21px}
+  .kpi .val small{font-size:11px}
+  .content{padding:16px 12px 50px}
+  .topbar{padding:10px 14px}
+  .topbar h1{font-size:17px}
+  .searchbar input[type=text]{max-width:none;flex:1 1 100%}
+  /* wide tables scroll horizontally instead of squishing */
+  .card .bd{overflow-x:auto;-webkit-overflow-scrolling:touch}
+  /* responsive card-style tables (add class "resp") */
+  table.resp thead{display:none}
+  table.resp,table.resp tbody,table.resp tr,table.resp td{display:block;width:100%}
+  table.resp tr{border:1px solid var(--line);border-radius:12px;margin:10px;padding:6px 12px;background:#fff;box-shadow:var(--shadow)}
+  table.resp td{border:none;padding:7px 0;display:flex;justify-content:space-between;align-items:center;gap:12px;text-align:right}
+  table.resp td::before{content:attr(data-label);font-size:11px;text-transform:uppercase;letter-spacing:.04em;color:var(--muted);font-weight:700;text-align:left;white-space:nowrap}
+  table.resp td.actcell{display:flex;gap:8px;padding-top:10px;border-top:1px dashed var(--line);margin-top:2px}
+  table.resp td.actcell::before{display:none}
+  table.resp td.actcell .btn{flex:1;justify-content:center;padding:11px 8px}
+  table.resp td.actcell .pill{align-self:center}
 }
 @media print{
   .sidebar,.topbar,.no-print{display:none!important}
@@ -713,15 +731,15 @@ function renderCollecte(el){
       <div class="kpi accent-red"><div class="lab">Impayés</div><div class="val num">${impayes.length}</div></div>
       <div class="kpi accent-gold"><div class="lab">Encaissé / attendu</div><div class="val num" style="font-size:18px">${money0(got)} / ${money0(due)}</div></div>
     </div>
-    <div class="alert info" style="margin-top:16px">📅 ${fmtDate(t)} — Appuyez sur <b>Payé</b> à la réception du versement. Un jour passé sans versement devient automatiquement un <b>retard</b>. En cas de rattrapage, ajoutez un <b>2ᵉ versement</b> le même jour.</div>
+    <div class="alert info" style="margin-top:16px">📅 ${fmtDate(t)} — Appuyez sur <b>Payé</b> à la réception. Un jour non versé devient un retard. Rattrapage : ajoutez un 2ᵉ versement.</div>
     <div class="card"><div class="bd" style="padding:0">
-    ${rows.length?`<table><thead><tr><th>Client</th><th class="num">Jour</th><th class="num">Montant</th><th class="num">Retard cumulé</th><th style="width:250px">Aujourd'hui</th></tr></thead><tbody>${rows.sort((a,b)=>(a.s.todayCount>0)-(b.s.todayCount>0)||b.s.arrears-a.s.arrears).map(({l,s})=>{
+    ${rows.length?`<table class="resp"><thead><tr><th>Client</th><th class="num">Jour</th><th class="num">Montant</th><th class="num">Retard cumulé</th><th style="width:250px">Aujourd'hui</th></tr></thead><tbody>${rows.sort((a,b)=>(a.s.todayCount>0)-(b.s.todayCount>0)||b.s.arrears-a.s.arrears).map(({l,s})=>{
       const c=clientById(l.clientId)||{}; const missToday=(l.misses||[]).some(m=>m.date===t);
       let action;
       if(s.todayCount>0){ action=`<span class="pill green">Payé${s.todayCount>1?' ×'+s.todayCount:''}</span> <button class="btn sm" onclick="payToday('${l.id}');renderCollecte(content())" title="Rattrapage : 2ᵉ versement">+ versement</button>`; }
       else if(missToday){ action=`<span class="pill red">Retard</span> <button class="btn sm green" onclick="payToday('${l.id}');renderCollecte(content())">Payé finalement</button>`; }
       else { action=`<button class="btn sm green" onclick="payToday('${l.id}');renderCollecte(content())">✓ Payé</button> <button class="btn sm danger" onclick="missToday('${l.id}');renderCollecte(content())">✗ Retard</button>`; }
-      return `<tr><td onclick="showLoanDetail('${l.id}')" style="cursor:pointer"><div class="t-name">${esc(c.name||"—")}</div><div class="t-sub">${esc(c.phone||"")}</div></td><td class="num">${s.daysElapsed}/${s.duration}</td><td class="num">${money0(s.daily)}</td><td class="num">${s.arrears>0?`<span style="color:var(--red);font-weight:700">${money0(s.arrears)}</span>`:"—"}</td><td>${action}</td></tr>`;
+      return `<tr><td data-label="Client" onclick="showLoanDetail('${l.id}')" style="cursor:pointer"><div class="t-name">${esc(c.name||"—")}</div><div class="t-sub">${esc(c.phone||"")}</div></td><td class="num" data-label="Jour">${s.daysElapsed}/${s.duration}</td><td class="num" data-label="Montant">${money0(s.daily)}</td><td class="num" data-label="Retard">${s.arrears>0?`<span style="color:var(--red);font-weight:700">${money0(s.arrears)}</span>`:"—"}</td><td class="actcell">${action}</td></tr>`;
     }).join("")}</tbody></table>`:`<div class="empty"><div class="ic">☀️</div><h3>Rien à collecter aujourd'hui</h3></div>`}
     </div></div>`;
 }
