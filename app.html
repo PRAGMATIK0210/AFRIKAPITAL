@@ -73,7 +73,21 @@ input:focus,select:focus{border-color:var(--teal);box-shadow:0 0 0 3px var(--tea
   .print-table th,.print-table td{padding:4px 6px}
   *{-webkit-print-color-adjust:exact!important;print-color-adjust:exact!important}
   img{display:inline-block!important}
+  .jc-table{font-size:13px}
+  .jc-table th,.jc-table td{padding:7px 8px}
+  .jc-sheet{page-break-inside:auto}
+  .jc-table tr{page-break-inside:avoid}
+  .jc-sign{margin-top:24px}
 }
+.jc-scroll{overflow-x:auto}
+.jc-table{width:100%;border-collapse:collapse;font-size:14px}
+.jc-table th{text-align:left;border-bottom:2px solid var(--ink);padding:8px 8px;font-size:12.5px;color:#33465b}
+.jc-table td{border-bottom:1px solid var(--line);padding:9px 8px}
+.jc-table .jc-name{font-weight:700;font-size:14.5px}
+.jc-table .jc-total td{font-weight:800;border-top:2px solid var(--ink);border-bottom:none}
+.jc-sign{margin-top:16px;font-size:13px;color:#33465b}
+.phead{display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap}
+.phead h2{margin:0}
 @media(max-width:900px){
   .app{grid-template-columns:1fr}
   .sidebar{position:fixed;left:0;top:0;bottom:0;width:240px;z-index:70;transform:translateX(-100%);transition:.2s;height:100vh}
@@ -171,7 +185,10 @@ const LOGO="data:image/jpeg;base64,/9j/4AAQSkZJRgABAQAAAQABAAD/2wBDAAYEBAUEBAYFB
 const sb=supabase.createClient(SUPABASE_URL,SUPABASE_KEY);
 const EP={express:{label:"Épargne Express",tag:"court terme"},koor:{label:"Épargne Koor",tag:"long terme"}};
 let ME=null,ROLE="collectrice",VIEW="dashboard",chan=null;
-let CLIENTS=[],LOANS=[],SAV=[],EXP=[],CASH=[],BANK=[];
+let CLIENTS=[],LOANS=[],SAV=[],EXP=[],CASH=[],BANK=[],HOLIDAYS=[];
+function isHoliday(d){return HOLIDAYS.indexOf(d)>=0;}
+function holidaysInRange(a,b){return HOLIDAYS.filter(d=>d>=a&&d<=b).length;}
+let _colQ="";
 
 function $(id){return document.getElementById(id);}
 function show(id,t,x){const e=$(id);if(e){e.className="msg show "+t;e.textContent=x;}}
@@ -194,12 +211,15 @@ function loanStats(l){
   const pays=d.payments||[];
   const paid=pays.reduce((s,p)=>s+(+p.amount||0),0);
   const balance=Math.max(0,total-paid);
-  const installmentsPaid=pays.filter(p=>p.kind!=="solde").length; // versements journaliers (hors solde final)
-  let dueYesterday=0; if(t>start) dueYesterday=Math.min(dur,Math.max(0,diffDays(start,t)-1)); dueYesterday=Math.max(0,dueYesterday); // 1er versement le LENDEMAIN de l'octroi
-  const arrearsDays=Math.max(0,dueYesterday-installmentsPaid);
+  const installmentsPaid=pays.filter(p=>p.kind!=="solde").length; // total versements (hors solde final) — pour affichage X/durée
+  // Couverture des jours PASSÉS uniquement : versements journaliers de jours passés + rattrapages de retard.
+  // Le versement du jour (kind 'jour' daté d'aujourd'hui) ne compte PAS ici → il ne réduit pas les retards.
+  const coveredPast=pays.filter(p=>{if(p.kind==="solde")return false;if(p.kind==="retard")return true;return p.date<t;}).length;
+  let dueYesterday=0; if(t>start){const rawDue=diffDays(start,t)-holidaysInRange(start,addDays(t,-1));dueYesterday=Math.min(dur,Math.max(0,rawDue));} dueYesterday=Math.max(0,dueYesterday); // 1er versement LE JOUR DE DÉBUT ; les jours fériés ne comptent pas comme dus
+  const arrearsDays=Math.max(0,dueYesterday-coveredPast);
   const arrears=arrearsDays*daily;
-  let elapsed=0;if(t>start)elapsed=Math.min(dur,diffDays(start,t));elapsed=Math.max(0,elapsed); // jour 1 = lendemain de l'octroi
-  const end=addDays(start,dur); // échéance = octroi + durée (versements de J+1 à J+durée)
+  let elapsed=0;if(t>=start)elapsed=Math.min(dur,diffDays(start,t)+1);elapsed=Math.max(0,elapsed); // jour 1 = jour de début
+  const end=addDays(start,dur-1); // échéance = du jour de début (J1) au jour J-durée
   const settled=d.status==="solde"||balance<=0;
   const status=settled?"solde":(arrearsDays>0?"retard":"actif");
   const paidToday=pays.some(p=>p.date===t&&p.kind!=="retard"&&p.kind!=="solde");
@@ -216,16 +236,19 @@ const NAV=[
   {sep:"Activité"},
   {v:"collecte",ic:"📅",label:"Collecte du jour",roles:["gerant","collectrice"]},
   {v:"retards",ic:"⏰",label:"Journal des retards",roles:["gerant","collectrice"]},
+  {v:"relances",ic:"🔔",label:"Relances WhatsApp",roles:["gerant","collectrice"]},
   {v:"clients",ic:"👥",label:"Clients",roles:["gerant","collectrice"]},
   {v:"loans",ic:"💳",label:"Prêts / Crédits",roles:["gerant"]},
   {v:"actifs",ic:"📋",label:"Prêts actifs (impr.)",roles:["gerant"]},
   {v:"journal",ic:"🗓️",label:"Journal collecte (impr.)",roles:["gerant","collectrice"]},
   {v:"mouvements",ic:"📒",label:"Journée (entrées/sorties)",roles:["gerant","collectrice"]},
+  {v:"activite",ic:"🧑‍💼",label:"Par collectrice",roles:["gerant"]},
   {sep:"Épargne & caisse"},
   {v:"express",ic:"⚡",label:"Épargne Express",roles:["gerant","collectrice"]},
   {v:"koor",ic:"🌱",label:"Épargne Koor",roles:["gerant","collectrice"]},
   {v:"depenses",ic:"💸",label:"Dépenses",roles:["gerant","collectrice"]},
-  {v:"caisse",ic:"🧮",label:"Caisse",roles:["gerant","collectrice"]},
+  {v:"caisse",ic:"🧮",label:"Caisse",roles:["gerant"]},
+  {v:"feries",ic:"📅",label:"Jours fériés",roles:["gerant"]},
   {sep:"Analyse"},
   {v:"compta",ic:"📊",label:"Comptabilité / Trésorerie",roles:["gerant"]},
   {v:"banque",ic:"🏦",label:"Banque",roles:["gerant"]},
@@ -241,16 +264,20 @@ const VIEWS={
   dashboard:{title:"Tableau de bord",sub:"Vue d'ensemble",render:renderDashboard},
   collecte:{title:"Collecte du jour",sub:"Un versement par jour",render:renderCollecte},
   retards:{title:"Journal des retards",sub:"Régler les jours manqués",render:renderRetards},
+  relances:{title:"Relances WhatsApp",sub:"Rappels aux clients en retard",render:renderRelances},
   carnet:{title:"Carnet du client",sub:"Détail des versements",render:renderCarnet},
   clients:{title:"Clients",sub:"Répertoire des clients",render:renderClients},
   loans:{title:"Prêts / Crédits",sub:"Crédits accordés",render:renderLoans},
   express:{title:"Épargne Express",sub:"Court terme — liste dédiée",render:()=>renderEp("express")},
   koor:{title:"Épargne Koor",sub:"Long terme — liste dédiée",render:()=>renderEp("koor")},
+  savcarnet:{title:"Carnet d'épargne",sub:"Détail de l'épargnant",render:renderSavCarnet},
   depenses:{title:"Dépenses",sub:"Sorties de caisse",render:renderDepenses},
   caisse:{title:"Caisse",sub:"Ouverture du jour (fermeture calculée)",render:renderCaisse},
+  feries:{title:"Jours fériés",sub:"Jours sans collecte (pas de retard)",render:renderFeries},
   actifs:{title:"Prêts actifs",sub:"Liste imprimable (début / fin)",render:renderActifs},
   journal:{title:"Journal de collecte",sub:"Par jour — imprimable",render:renderJournal},
   mouvements:{title:"Journée — entrées / sorties",sub:"Tous les mouvements du jour",render:renderMouv},
+  activite:{title:"Activité par collectrice",sub:"Encaissements par personne",render:renderActivite},
   historique:{title:"Historique & CA",sub:"Chiffre d'affaires et volumes",render:renderHistorique},
   archive:{title:"Archive des prêts",sub:"Tous les prêts accordés",render:renderArchive},
   interets:{title:"Bilan des intérêts",sub:"Gains par mois",render:renderInterets},
@@ -297,6 +324,7 @@ async function loadAll(){
   EXP=(e.data||[]).map(r=>({id:r.id,data:r.data||{}}));
   CASH=(cb.data||[]).map(r=>({id:r.id,data:r.data||{}}));
   BANK=CASH.filter(r=>r.data.kind==="bank");
+  HOLIDAYS=CASH.filter(r=>r.data.kind==="ferie").map(r=>r.data.date).filter(Boolean);
   if(VIEW&&VIEWS[VIEW])VIEWS[VIEW].render($("content"));
 }
 
@@ -307,7 +335,7 @@ function renderDashboard(el){
   const encours=active.reduce((x,s)=>x+s.balance,0);
   const retards=active.filter(s=>s.status==="retard");
   const arrAmt=retards.reduce((a,s)=>a+s.arrears,0);
-  const colRows=LOANS.map(l=>({l,s:loanStats(l)})).filter(r=>r.s.status!=="solde"&&t>r.s.start);
+  const colRows=LOANS.map(l=>({l,s:loanStats(l)})).filter(r=>r.s.status!=="solde"&&t>=r.s.start);
   const colDone=colRows.filter(r=>r.s.paidToday).length;
   const colRemain=colRows.filter(r=>!r.s.paidToday);
   const colRemainAmt=colRemain.reduce((a,r)=>a+Math.min(r.s.daily,r.s.balance),0);
@@ -319,19 +347,19 @@ function renderDashboard(el){
   const epK=SAV.filter(s=>(s.data.plan||"express")==="koor").reduce((a,s)=>a+((s.data.type==="retrait")?-1:1)*(+s.data.amount||0),0);
   const F=(typeof projectWithRenewals==="function")?projectWithRenewals(30,0):{minT:0,minD:t};
   const alerts=[];
-  if(!cashBase())alerts.push(`<div class="mv" onclick="go('caisse')" style="cursor:pointer;background:var(--gold-l,#f7efdc)"><div><div class="nm">⚙️ Définir le solde de caisse initial</div><div class="sb">Nécessaire pour suivre la trésorerie</div></div><div class="sp"></div><span class="pill o">à faire</span></div>`);
+  if(canEdit()&&!cashBase())alerts.push(`<div class="mv" onclick="go('caisse')" style="cursor:pointer;background:var(--gold-l,#f7efdc)"><div><div class="nm">⚙️ Définir le solde de caisse initial</div><div class="sb">Nécessaire pour suivre la trésorerie</div></div><div class="sp"></div><span class="pill o">à faire</span></div>`);
   if(colRemain.length)alerts.push(`<div class="mv" onclick="go('collecte')" style="cursor:pointer"><div><div class="nm">📅 Collecte du jour</div><div class="sb">${colDone}/${colRows.length} faits · reste ${money(colRemainAmt)} à encaisser</div></div><div class="sp"></div><span class="pill ${colRemain.length? 'o':'green'}">${colRemain.length} à faire</span></div>`);
   else if(colRows.length)alerts.push(`<div class="mv" style="background:var(--green-l)"><div><div class="nm">📅 Collecte du jour</div><div class="sb">Tous les ${colRows.length} clients collectés 🎉</div></div><div class="sp"></div><span class="pill green">✓</span></div>`);
   if(svTot&&svDone<svTot)alerts.push(`<div class="mv" onclick="go('koor')" style="cursor:pointer"><div><div class="nm">💰 Épargne du jour</div><div class="sb">${svDone}/${svTot} épargnants collectés</div></div><div class="sp"></div><span class="pill o">${svTot-svDone} à faire</span></div>`);
   if(retards.length)alerts.push(`<div class="mv" onclick="go('retards')" style="cursor:pointer"><div><div class="nm">⏰ Retards</div><div class="sb">${retards.length} client(s) · ${money(arrAmt)} en retard</div></div><div class="sp"></div><span class="pill red">${retards.length}</span></div>`);
   if(finishing)alerts.push(`<div class="mv" onclick="go('renouv')" style="cursor:pointer"><div><div class="nm">🔄 À renouveler bientôt</div><div class="sb">${finishing} prêt(s) se terminent (~1 versement)</div></div><div class="sp"></div><span class="pill o">${finishing}</span></div>`);
-  if(F.minT<0)alerts.push(`<div class="mv" onclick="go('renouv')" style="cursor:pointer;background:var(--red-l)"><div><div class="nm">⚠️ Trésorerie</div><div class="sb">Deviendrait négative (${money(F.minT)}) le ${fmtDate(F.minD)} si vous renouvelez tout</div></div><div class="sp"></div><span class="pill red">alerte</span></div>`);
+  if(canEdit()&&F.minT<0)alerts.push(`<div class="mv" onclick="go('renouv')" style="cursor:pointer;background:var(--red-l)"><div><div class="nm">⚠️ Trésorerie</div><div class="sb">Deviendrait négative (${money(F.minT)}) le ${fmtDate(F.minD)} si vous renouvelez tout</div></div><div class="sp"></div><span class="pill red">alerte</span></div>`);
   el.innerHTML=`
   <div class="kpis">
     <div class="kpi"><div class="l">Prêts actifs</div><div class="v">${active.length}</div></div>
     <div class="kpi"><div class="l">Encours</div><div class="v" style="font-size:17px">${money(encours)}</div></div>
     <div class="kpi"><div class="l">En retard</div><div class="v" style="color:var(--red)">${retards.length}</div></div>
-    <div class="kpi"><div class="l">Caisse</div><div class="v" style="font-size:15px;color:${cashVal!==null&&cashVal<0?'var(--red)':'var(--teal)'}">${cashVal===null?"—":money(cashVal)}</div></div>
+    ${canEdit()?`<div class="kpi"><div class="l">Caisse</div><div class="v" style="font-size:15px;color:${cashVal!==null&&cashVal<0?'var(--red)':'var(--teal)'}">${cashVal===null?"—":money(cashVal)}</div></div>`:`<div class="kpi"><div class="l">À collecter</div><div class="v">${colRemain.length}</div></div>`}
   </div>
   <div class="card"><h2 style="margin-bottom:10px">À faire aujourd'hui — ${fmtDate(t)}</h2>${alerts.length?alerts.join(""):`<div class="empty">Tout est à jour ! 🎉</div>`}</div>
   <div class="card"><h2 style="margin-bottom:8px">Résumé</h2>
@@ -346,7 +374,7 @@ function renderDashboard(el){
 /* ---------- COLLECTE ---------- */
 function renderCollecte(el){
   const t=todayISO();
-  const rows=LOANS.map(l=>({l,s:loanStats(l)})).filter(r=>r.s.status!=="solde"&&t>r.s.start);
+  const rows=LOANS.map(l=>({l,s:loanStats(l)})).filter(r=>r.s.status!=="solde"&&t>=r.s.start);
   let got=0,paidN=0;rows.forEach(r=>{if(r.s.todayCount>0){paidN++;got+=r.s.daily;}});
   el.innerHTML=`
   <div class="kpis" style="grid-template-columns:repeat(3,1fr)">
@@ -354,16 +382,24 @@ function renderCollecte(el){
     <div class="kpi"><div class="l">Payés</div><div class="v" style="color:var(--green)">${paidN}</div></div>
     <div class="kpi"><div class="l">Encaissé</div><div class="v" style="font-size:17px">${money(got)}</div></div>
   </div>
+  <div class="searchbar"><input type="text" id="colSearch" value="${esc(_colQ||"")}" placeholder="🔍 Rechercher un client…" oninput="_colQ=this.value;renderColRows()" autocomplete="off"></div>
+  ${isHoliday(t)?`<div class="status" style="background:var(--gold-l,#f7efdc);color:#8a6d1f;margin-bottom:10px">📅 Jour férié — aucun versement n'est attendu aujourd'hui (pas de retard).</div>`:""}
   <div class="status" style="margin-bottom:10px">📅 ${fmtDate(t)}</div>
   <div id="colList"></div>`;
-  const host=$("colList");
-  if(!rows.length){host.innerHTML=`<div class="empty">Rien à collecter aujourd'hui.</div>`;return;}
+  renderColRows();
+}
+function renderColRows(){
+  const host=$("colList");if(!host)return;const t=todayISO();
+  let rows=LOANS.map(l=>({l,s:loanStats(l)})).filter(r=>r.s.status!=="solde"&&t>=r.s.start);
+  const q=(($("colSearch")?$("colSearch").value:_colQ)||"").toLowerCase().trim();
+  if(q)rows=rows.filter(r=>clientName(r.l.data.clientId).toLowerCase().includes(q));
+  if(!rows.length){host.innerHTML=`<div class="empty">${q?"Aucun client trouvé.":"Rien à collecter aujourd'hui."}</div>`;return;}
   rows.sort((a,b)=>(a.s.todayCount>0)-(b.s.todayCount>0)||b.s.arrears-a.s.arrears);
   host.innerHTML=rows.map(({l,s})=>{
     let act;
     if(s.paidToday)act=`<span class="pill green" style="align-self:center;flex:1;text-align:center">✓ Payé aujourd'hui</span>${canEdit()?`<button class="btn red sm" onclick="cancelPay('${l.id}')">Annuler</button>`:""}`;
     else act=`<button class="btn green" onclick="pay('${l.id}')">✓ Versement du jour</button>`;
-    return `<div class="item"><div class="nm">${esc(clientName(l.data.clientId))}</div><div class="sb">Jour ${s.elapsed}/${s.dur} · ${money(s.daily)} FCFA/j · reste ${money(s.balance)} · ${s.arrearsDays>0?`<span style="color:var(--red);font-weight:700">${s.arrearsDays} j de retard (${money(s.arrears)})</span>`:"à jour"}</div><div class="act">${act}</div></div>`;
+    return `<div class="item"><div class="nm">${esc(clientName(l.data.clientId))}</div><div class="sb">Jour ${s.elapsed}/${s.dur} · Attendu ${money(s.daily)} · Reçu ${s.paidToday?`<b style="color:var(--green)">${money(s.daily)}</b>`:`<span style="color:var(--red)">—</span>`} · reste ${money(s.balance)}${s.arrearsDays>0?` · <span style="color:var(--red);font-weight:700">${s.arrearsDays} j retard (${money(s.arrears)})</span>`:""}</div><div class="act">${act}</div></div>`;
   }).join("");
 }
 async function pay(loanId){const l=LOANS.find(x=>x.id===loanId);if(!l)return;const s=loanStats(l);const t=todayISO();if(s.paidToday){toast("Déjà payé aujourd'hui");return;}if(s.balance<=0){toast("Prêt déjà soldé");return;}const amount=Math.min(s.daily,s.balance);const snap=JSON.stringify(l.data);const d=l.data;d.payments=d.payments||[];d.payments.push({date:t,amount,by:ME.email,kind:"jour"});await pushLoan(l,"Versement du jour enregistré",snap);}
@@ -419,7 +455,7 @@ function openEditLoan(loanId){if(!canEdit()){toast("Réservé au gérant");retur
 function calcLoan(){const cap=+$("lCap").value||0,dur=+$("lDur").value||DUR,daily=+$("lDaily").value||0,start=$("lStart").value||todayISO();const total=Math.round(cap*(1+RATE/100));const soldeFinal=Math.max(0,total-daily*dur);$("cTotal").textContent=total?money(total)+" FCFA":"—";$("cInt").textContent=cap?money(total-cap)+" FCFA":"—";$("cEnd").textContent=dur?fmtDate(addDays(start,dur)):"—";const sf=$("cSolde");if(sf)sf.textContent=(daily&&dur)?money(soldeFinal)+" FCFA":"—";}
 async function saveLoan(){if(!canEdit())return;const id=$("lLoanId").value;const clientId=$("lClient").value,cap=+$("lCap").value||0,dur=+$("lDur").value||DUR,daily=+$("lDaily").value||0,start=$("lStart").value||todayISO();if(!clientId||cap<=0||daily<=0){show("lMsg","err","Client, capital et journalier requis.");return;}const total=Math.round(cap*(1+RATE/100));show("lMsg","info","Enregistrement…");
   if(id){const l=LOANS.find(x=>x.id===id);if(!l){show("lMsg","err","Prêt introuvable.");return;}const paidCount=(l.data.payments||[]).filter(p=>p.kind!=="solde").length;if(paidCount>dur){show("lMsg","err","Durée trop courte : "+paidCount+" versements déjà faits.");return;}const data=Object.assign({},l.data,{capital:cap,duration:dur,daily,total,startDate:start});if(data.status==="solde"){const np=(data.payments||[]).reduce((a,p)=>a+(+p.amount||0),0);if(np<total)data.status="actif";}const {ok}=await withRetry(()=>sb.from("loans").update({data,updated_at:new Date().toISOString(),updated_by:ME.id}).eq("id",id));if(!ok){show("lMsg","err","Non enregistré (réseau). Réessayez.");return;}close_("ovLoan");toast("Prêt modifié");loadAll();return;}
-  const data={clientId,capital:cap,duration:dur,daily,total,startDate:start,status:"actif",payments:[]};const {ok}=await withRetry(()=>sb.from("loans").insert({data,updated_by:ME.id}));if(!ok){show("lMsg","err","Non enregistré (réseau). Réessayez.");return;}close_("ovLoan");toast("Crédit accordé");go("collecte");loadAll();}
+  const data={clientId,capital:cap,duration:dur,daily,total,startDate:start,disbursedDate:todayISO(),status:"actif",payments:[]};const {ok}=await withRetry(()=>sb.from("loans").insert({data,updated_by:ME.id}));if(!ok){show("lMsg","err","Non enregistré (réseau). Réessayez.");return;}close_("ovLoan");toast("Crédit accordé");go("collecte");loadAll();}
 
 /* ---------- EPARGNE JOURNALIERE ---------- */
 function planCfgKey(plan){return plan==="express"?"epExpress":"epKoor";}
@@ -432,26 +468,27 @@ function renderEp(plan){
   const t=todayISO();const collN=svs.filter(c=>collectedToday(c.id,plan)).length;
   const gotToday=svs.filter(c=>collectedToday(c.id,plan)).reduce((a,c)=>a+(+c[k].daily||0),0);
   el.innerHTML=`
-  <div class="kpis" style="grid-template-columns:repeat(4,1fr)">
+  <div class="kpis no-print" style="grid-template-columns:repeat(4,1fr)">
     <div class="kpi"><div class="l">${info.label} détenue</div><div class="v" style="font-size:16px">${money(inS-outS)}</div></div>
     <div class="kpi"><div class="l">Épargnants</div><div class="v">${svs.length}</div></div>
     <div class="kpi"><div class="l">Collectés auj.</div><div class="v" style="color:var(--green)">${collN}/${svs.length}</div></div>
     <div class="kpi"><div class="l">Encaissé auj.</div><div class="v" style="font-size:16px">${money(gotToday)}</div></div>
   </div>
-  <div class="row" style="margin-bottom:12px">${canEdit()?`<button class="btn alt" style="flex:1" onclick="openAddSaver('${plan}')">+ Épargnant</button>`:""}<button class="btn gold" style="flex:1" onclick="openSaving('retrait','${plan}')">− Retrait</button></div>
-  <div class="card"><h2 style="margin-bottom:8px">Collecte du jour — ${fmtDate(t)}</h2><div id="epColl"></div></div>
-  <div class="card"><h2 style="margin-bottom:8px">Soldes par épargnant</h2><div id="epBal"></div></div>
-  <div class="card"><h2 style="margin-bottom:8px">Derniers mouvements</h2><div id="epList"></div></div>`;
+  <div class="row no-print" style="margin-bottom:12px;flex-wrap:wrap">${canEdit()?`<button class="btn alt" onclick="openAddSaver('${plan}')">+ Épargnant</button>`:""}${canEdit()?`<button class="btn gold" onclick="openSaving('retrait','${plan}')">− Retrait</button>`:""}${canEdit()?`<button class="btn" onclick="window.print()">🖨️ Soldes</button><button class="btn alt" onclick="savePDF('soldes-${plan}-${t}')">📄 PDF</button>`:""}</div>
+  <div class="card no-print"><h2 style="margin-bottom:8px">Collecte du jour — ${fmtDate(t)}</h2><div id="epColl"></div></div>
+  <div class="card"><img src="${LOGO}" alt="AFRIKAPITAL" style="height:40px;margin-bottom:8px"><div class="phead"><h2>Soldes — ${info.label}</h2><div class="status">Total ${money(inS-outS)} · ${fmtDate(t)}</div></div><div id="epBal"></div></div>
+  <div class="card no-print"><h2 style="margin-bottom:8px">Derniers mouvements</h2><div id="epList"></div></div>`;
   // collecte du jour
   $("epColl").innerHTML=svs.length?svs.map(c=>{
     const daily=+c[k].daily||0;const done=collectedToday(c.id,plan);
     let act=done?`<span class="pill green" style="align-self:center;flex:1;text-align:center">✓ Collecté</span>${canEdit()?`<button class="btn red sm" onclick="cancelCollect('${c.id}','${plan}')">Annuler</button>`:""}`:`<button class="btn green" onclick="collectSaving('${c.id}','${plan}')">✓ Collecté (${money(daily)})</button>`;
+    act+=`<button class="btn ghost sm" onclick="openSavCarnet('${c.id}','${plan}')" title="Carnet">📖</button>`;
     if(canEdit()&&!done)act+=`<button class="btn ghost sm" onclick="editSaverDaily('${c.id}','${plan}')" title="Modifier le montant">✏️</button>`;
     return `<div class="item"><div class="nm">${esc(c.name)}</div><div class="sb">${money(daily)} FCFA/jour · solde ${money(savingsOf(c.id,plan))}</div><div class="act">${act}</div></div>`;
   }).join(""):`<div class="empty">Aucun épargnant.${canEdit()?" Ajoutez-en un avec « + Épargnant ».":""}</div>`;
   // soldes
-  const bals=svs.map(c=>({c,b:savingsOf(c.id,plan)})).filter(x=>x.b>0).sort((a,b)=>b.b-a.b);
-  $("epBal").innerHTML=bals.length?bals.map(({c,b})=>`<div class="bal"><span>${esc(c.name)}</span><b>${money(b)}</b></div>`).join(""):`<div class="empty">Aucun solde.</div>`;
+  const bals=svs.map(c=>({c,b:savingsOf(c.id,plan),d:+c[k].daily||0})).filter(x=>x.b>0||x.d>0).sort((a,b)=>b.b-a.b);
+  $("epBal").innerHTML=bals.length?bals.map(({c,b,d})=>`<div class="bal"><span>${esc(c.name)} <span class="sb">(${money(d)}/j)</span></span><b>${money(b)}</b></div>`).join(""):`<div class="empty">Aucun solde.</div>`;
   // mouvements
   const rows=list.slice().sort((a,b)=>(b.data.date||"").localeCompare(a.data.date||""));
   $("epList").innerHTML=rows.length?rows.slice(0,60).map(s=>{const d=s.data;const isRet=d.type==="retrait";return `<div class="mv"><div><div class="nm">${esc(clientName(d.clientId))}</div><div class="sb">${fmtDate(d.date)}${d.by&&d.by!=="import"?" · "+esc(d.by.split("@")[0]):(d.by==="import"?" · import":"")}</div></div><div class="sp"></div><b style="color:${isRet?'var(--red)':'var(--green)'}">${isRet?"-":"+"}${money(d.amount)}</b>${canEdit()?`<button class="btn ghost sm" onclick="delSaving('${s.id}')">✕</button>`:""}</div>`;}).join(""):`<div class="empty">Aucun mouvement.</div>`;
@@ -487,7 +524,34 @@ async function editSaverDaily(clientId,plan){
   const {ok}=await withRetry(()=>sb.from("clients").update({data,updated_at:new Date().toISOString(),updated_by:ME.id}).eq("id",clientId));
   if(!ok){toast("⚠️ Non enregistré (réseau).");return;}toast("Montant modifié");loadAll();
 }
-function openSaving(type,plan){const info=EP[plan];const isRet=type==="retrait";$("sPlan").value=plan;$("sType").value=type;$("savTitle").textContent=(isRet?"Retrait":"Dépôt")+" — "+info.label;$("savCat").textContent="Catégorie : "+info.label+" ("+info.tag+")";const opts=(isRet?CLIENTS.filter(c=>savingsOf(c.id,plan)>0):savers(plan)).slice().sort((a,b)=>(a.name||"").localeCompare(b.name||"")).map(c=>`<option value="${c.id}">${esc(c.name)} — solde ${money(savingsOf(c.id,plan))}</option>`).join("");$("sClient").innerHTML=opts||`<option value="">(aucun épargnant)</option>`;$("sAmt").value="";$("sDate").value=todayISO();hide("sMsg");savHint();$("ovSav").classList.add("show");}
+let _savCar=null;
+function openSavCarnet(clientId,plan){_savCar={clientId,plan};go("savcarnet");}
+function renderSavCarnet(el){
+  if(!_savCar){el.innerHTML=`<div class="empty">Sélectionnez un épargnant (bouton 📖).</div>`;return;}
+  const {clientId,plan}=_savCar;const k=planCfgKey(plan);const c=CLIENTS.find(x=>x.id===clientId);const info=EP[plan];
+  if(!c||!c[k]){el.innerHTML=`<div class="empty">Épargnant introuvable.</div>`;return;}
+  const daily=+c[k].daily||0;const since=c[k].since||"";const bal=savingsOf(clientId,plan);const t=todayISO();
+  const movs=SAV.filter(s=>s.data.clientId===clientId&&(s.data.plan||"express")===plan).slice().sort((a,b)=>(b.data.date||"").localeCompare(a.data.date||""));
+  const collN=movs.filter(s=>s.data.type!=="retrait"&&s.data.kind==="jour").length;
+  let cells="";for(let i=29;i>=0;i--){const dd=addDays(t,-i);const has=SAV.some(s=>s.data.clientId===clientId&&(s.data.plan||"express")===plan&&s.data.date===dd&&s.data.type!=="retrait");cells+=`<div title="${fmtDate(dd)}" style="width:26px;height:26px;border-radius:6px;background:${has?'var(--green-l)':'var(--red-l)'};display:grid;place-items:center;font-size:11px;font-weight:700">${has?'✓':'·'}</div>`;}
+  el.innerHTML=`
+  <div class="searchbar no-print"><div class="row"><button class="btn alt" onclick="go('${plan}')">← ${info.label}</button>${canEdit()?`<button class="btn" onclick="window.print()">🖨️ Imprimer</button><button class="btn alt" onclick="savePDF('epargne-${(c.name||'').replace(/[^a-zA-Z0-9]+/g,'_')}-${t}')">📄 PDF</button>`:""}${c.phone?`<button class="btn green" onclick="sendSavWhatsApp('${clientId}','${plan}')">📲 WhatsApp</button>`:""}</div></div>
+  <div class="card"><img src="${LOGO}" alt="AFRIKAPITAL" style="height:40px;margin-bottom:8px"><div class="phead"><h2>${esc(c.name)}</h2><div class="status">${info.label} · ${fmtDate(t)}</div></div>
+    <div class="bal"><span>Montant journalier</span><b>${money(daily)} FCFA${canEdit()?` <a href="#" class="no-print" onclick="editSaverDaily('${clientId}','${plan}');return false" style="color:var(--teal)">✏️ modifier</a>`:""}</b></div>
+    <div class="bal"><span>Solde actuel</span><b style="color:var(--teal)">${money(bal)} FCFA</b></div>
+    ${since?`<div class="bal"><span>Épargne depuis</span><b>${fmtDate(since)}</b></div>`:""}
+    <div class="bal"><span>Jours collectés (via l'appli)</span><b>${collN}</b></div>
+    <div style="margin-top:10px"><div class="sb" style="margin-bottom:6px">30 derniers jours (✓ collecté · · non collecté)</div><div style="display:flex;flex-wrap:wrap;gap:5px">${cells}</div></div>
+  </div>
+  <div class="card"><h2 style="margin-bottom:8px">Mouvements</h2>${movs.length?movs.map(s=>{const isRet=s.data.type==="retrait";return `<div class="mv"><div><div class="nm">${isRet?"Retrait":"Dépôt"}${s.data.note?" — "+esc(s.data.note):""}</div><div class="sb">${fmtDate(s.data.date)}${s.data.by&&s.data.by!=="import"?" · "+esc(String(s.data.by).split("@")[0]):(s.data.by==="import"?" · import":"")}</div></div><div class="sp"></div><b style="color:${isRet?'var(--red)':'var(--green)'}">${isRet?"-":"+"}${money(s.data.amount)}</b></div>`;}).join(""):`<div class="empty">Aucun mouvement.</div>`}</div>`;
+}
+function sendSavWhatsApp(clientId,plan){
+  const c=CLIENTS.find(x=>x.id===clientId);if(!c)return;const phone=waPhone(c.phone);if(!phone){toast("Numéro manquant");return;}
+  const info=EP[plan];const bal=savingsOf(clientId,plan);const daily=+(c[planCfgKey(plan)]||{}).daily||0;
+  let msg="*AFRIKAPITAL — Épargne*\n";msg+="Client : "+c.name+"\n";msg+=info.label+"\n";msg+="Épargne journalière : "+money(daily)+" FCFA\n";msg+="Solde actuel : "+money(bal)+" FCFA\n";msg+="\nMerci de votre confiance.";
+  window.open("https://wa.me/"+phone+"?text="+encodeURIComponent(msg),"_blank");
+}
+function openSaving(type,plan){const info=EP[plan];const isRet=type==="retrait";if(isRet&&!canEdit()){toast("Retrait réservé au gérant");return;}$("sPlan").value=plan;$("sType").value=type;$("savTitle").textContent=(isRet?"Retrait":"Dépôt")+" — "+info.label;$("savCat").textContent="Catégorie : "+info.label+" ("+info.tag+")";const opts=(isRet?CLIENTS.filter(c=>savingsOf(c.id,plan)>0):savers(plan)).slice().sort((a,b)=>(a.name||"").localeCompare(b.name||"")).map(c=>`<option value="${c.id}">${esc(c.name)} — solde ${money(savingsOf(c.id,plan))}</option>`).join("");$("sClient").innerHTML=opts||`<option value="">(aucun épargnant)</option>`;$("sAmt").value="";$("sDate").value=todayISO();hide("sMsg");savHint();$("ovSav").classList.add("show");}
 function savHint(){const c=$("sClient").value,pl=$("sPlan").value;$("savHint").innerHTML="Solde actuel : <b>"+money(savingsOf(c,pl))+"</b>";}
 async function saveSaving(){const clientId=$("sClient").value,type=$("sType").value,plan=$("sPlan").value,amount=+$("sAmt").value||0;if(!clientId){show("sMsg","err","Choisis un client.");return;}if(amount<=0){show("sMsg","err","Montant invalide.");return;}if(type==="retrait"&&amount>savingsOf(clientId,plan)&&!confirm("Le retrait dépasse le solde. Continuer ?"))return;show("sMsg","info","Enregistrement…");const {ok,error}=await withRetry(()=>sb.from("savings").insert({data:{clientId,type,plan,amount,date:$("sDate").value||todayISO(),by:ME.email}}));if(!ok){show("sMsg","err","Non enregistré (réseau). Réessayez.");return;}close_("ovSav");toast("Enregistré");loadAll();}
 async function delSaving(id){if(!canEdit())return;if(!confirm("Supprimer ce mouvement ?"))return;const {error}=await sb.from("savings").delete().eq("id",id);if(error){toast("Suppression impossible");return;}toast("Supprimé");loadAll();}
@@ -510,9 +574,39 @@ function dayDepots(date){return SAV.filter(s=>s.data.type!=="retrait"&&s.data.da
 function dayRetraits(date){return SAV.filter(s=>s.data.type==="retrait"&&s.data.date===date).reduce((a,s)=>a+(+s.data.amount||0),0);}
 function dayDepenses(date){return EXP.filter(e=>e.data.date===date).reduce((a,e)=>a+(+e.data.amount||0),0);}
 function dayBank(date){return BANK.filter(b=>b.data.date===date).reduce((a,b)=>a+((b.data.type==="depot")?-1:1)*(+b.data.amount||0),0);} // transfert vers banque = sortie de caisse
-function dayDisbursed(date){return LOANS.filter(l=>l.data.startDate===date).reduce((a,l)=>a+(+l.data.capital||0),0);}
+function dayDisbursed(date){return LOANS.filter(l=>(l.data.disbursedDate||l.data.startDate)===date).reduce((a,l)=>a+(+l.data.capital||0),0);}
 function netDay(date){return dayCollecte(date)+dayDepots(date)-dayRetraits(date)-dayDepenses(date)+dayBank(date)-dayDisbursed(date);}
-function cashBase(){return CASH.filter(c=>c.data.kind!=="bank").slice().sort((a,b)=>(a.data.date||"").localeCompare(b.data.date||""))[0]||null;}
+function cashBase(){return CASH.filter(c=>c.data.kind!=="bank"&&c.data.kind!=="ferie").slice().sort((a,b)=>(a.data.date||"").localeCompare(b.data.date||""))[0]||null;}
+let _ferDate=null;
+function renderFeries(el){
+  const t=todayISO();const d=_ferDate||t;
+  const days=CASH.filter(c=>c.data.kind==="ferie").slice().sort((a,b)=>(b.data.date||"").localeCompare(a.data.date||""));
+  el.innerHTML=`
+  <div class="status" style="margin-bottom:10px">Marquez un <b>jour férié</b> (fête, jour non ouvré). Ce jour-là, <b>aucun versement n'est attendu</b> : il ne comptera pas comme retard, pour tous les prêts.</div>
+  <div class="card"><h2 style="margin-bottom:8px">Ajouter un jour férié</h2>
+    <label>Date</label><input type="date" id="ferInp" value="${d}">
+    <label>Libellé (optionnel)</label><input type="text" id="ferLbl" placeholder="ex. Tabaski, Magal, Indépendance…">
+    <button class="btn full" style="margin-top:12px" onclick="addHoliday()">📅 Marquer ce jour férié</button>
+    ${isHoliday(t)?`<div class="status" style="background:var(--gold-l,#f7efdc);margin-top:10px">Aujourd'hui (${fmtDate(t)}) est marqué férié.</div>`:""}
+  </div>
+  <div class="card"><h2 style="margin-bottom:8px">Jours fériés enregistrés — ${days.length}</h2>${days.length?days.map(h=>`<div class="mv"><div><div class="nm">${fmtDate(h.data.date)}</div>${h.data.label?`<div class="sb">${esc(h.data.label)}</div>`:""}</div><div class="sp"></div><button class="btn ghost sm" onclick="removeHoliday('${h.id}')">✕ Retirer</button></div>`).join(""):`<div class="empty">Aucun jour férié marqué.</div>`}</div>`;
+}
+async function addHoliday(){
+  if(!canEdit()){toast("Réservé au gérant");return;}
+  const date=$("ferInp").value;if(!date){toast("Choisissez une date");return;}
+  if(isHoliday(date)){toast("Ce jour est déjà férié");return;}
+  const label=($("ferLbl").value||"").trim();
+  const {ok}=await withRetry(()=>sb.from("cashbook").insert({data:{kind:"ferie",date,label},updated_by:ME.id}));
+  if(!ok){toast("⚠️ Non enregistré (réseau).");return;}
+  toast("Jour férié marqué");loadAll();
+}
+async function removeHoliday(id){
+  if(!canEdit()){toast("Réservé au gérant");return;}
+  if(!confirm("Retirer ce jour férié ? Les retards seront recalculés."))return;
+  const {error}=await sb.from("cashbook").delete().eq("id",id);
+  if(error){toast("Suppression impossible");return;}
+  toast("Jour férié retiré");loadAll();
+}
 function netBetween(from,toExcl){let s=0;LOANS.forEach(l=>{(l.data.payments||[]).forEach(p=>{if(p.date>=from&&p.date<toExcl)s+=+p.amount||0;});if(l.data.startDate>=from&&l.data.startDate<toExcl)s-=+l.data.capital||0;});SAV.forEach(x=>{if(x.data.date>=from&&x.data.date<toExcl)s+=((x.data.type==="retrait")?-1:1)*(+x.data.amount||0);});EXP.forEach(e=>{if(e.data.date>=from&&e.data.date<toExcl)s-=+e.data.amount||0;});BANK.forEach(b=>{if(b.data.date>=from&&b.data.date<toExcl)s+=((b.data.type==="depot")?-1:1)*(+b.data.amount||0);});return s;}
 function openingFor(date){const b=cashBase();if(!b)return null;if(date<=b.data.date)return +b.data.opening||0;return (+b.data.opening||0)+netBetween(b.data.date,date);}
 function closeFor(date){const o=openingFor(date);if(o===null)return null;return o+netDay(date);}
@@ -542,6 +636,36 @@ function renderCaisse(el){
 }
 async function setInitialCash(){const o=+$("cbOpen").value||0;const {ok}=await withRetry(()=>sb.from("cashbook").insert({data:{date:todayISO(),opening:o,initial:true},updated_by:ME.id}));if(!ok){toast("⚠️ Non enregistré (réseau).");return;}toast("Solde initial défini");loadAll();}
 async function editInitialCash(){const base=cashBase();if(!base)return;const v=prompt("Corriger le solde de caisse initial (défini le "+fmtDate(base.data.date)+") :",base.data.opening||0);if(v===null)return;const o=+v||0;const {ok}=await withRetry(()=>sb.from("cashbook").update({data:{...base.data,opening:o},updated_at:new Date().toISOString(),updated_by:ME.id}).eq("id",base.id));if(!ok){toast("⚠️ Non enregistré (réseau).");return;}toast("Solde initial corrigé");loadAll();}
+
+/* ---------- RELANCES WHATSAPP ---------- */
+function missedDates(l){
+  const s=loanStats(l);if(s.arrearsDays<=0)return [];
+  const pays=new Set((l.data.payments||[]).map(p=>p.date));
+  const res=[];let d=addDays(todayISO(),-1);let guard=0;
+  while(res.length<s.arrearsDays&&d>s.start&&guard<500){if(!pays.has(d))res.push(d);d=addDays(d,-1);guard++;}
+  return res.reverse();
+}
+function remindWhatsApp(loanId){
+  const l=LOANS.find(x=>x.id===loanId);if(!l)return;const c=CLIENTS.find(x=>x.id===l.data.clientId);if(!c){toast("Client introuvable");return;}
+  const phone=waPhone(c.phone);if(!phone){toast("Numéro manquant");return;}
+  const s=loanStats(l);const dates=missedDates(l).map(d=>fmtDate(d));
+  let msg="*AFRIKAPITAL — Rappel de versement*\n";
+  msg+="Bonjour "+c.name+",\n\n";
+  if(dates.length)msg+="Nous n'avons pas reçu votre versement de "+money(s.daily)+" FCFA pour : "+dates.join(", ")+".\n\n";
+  msg+="Retard total : "+s.arrearsDays+" jour(s) = "+money(s.arrears)+" FCFA.\n";
+  msg+="Merci de bien vouloir régulariser au plus vite.\n\nAFRIKAPITAL";
+  window.open("https://wa.me/"+phone+"?text="+encodeURIComponent(msg),"_blank");
+}
+function renderRelances(el){
+  const rows=LOANS.map(l=>({l,s:loanStats(l)})).filter(r=>r.s.status==="retard").sort((a,b)=>b.s.arrearsDays-a.s.arrearsDays);
+  const withPhone=rows.filter(r=>waPhone((CLIENTS.find(x=>x.id===r.l.data.clientId)||{}).phone));
+  const noPhone=rows.filter(r=>!waPhone((CLIENTS.find(x=>x.id===r.l.data.clientId)||{}).phone));
+  el.innerHTML=`
+  <div class="status" style="margin-bottom:10px">Envoyez un rappel aux clients en retard. Le message est <b>déjà prêt</b> ; il vous suffit d'appuyer sur <b>Envoyer</b> dans WhatsApp. <span style="color:var(--muted)">(L'envoi 100 % automatique sans clic n'est pas permis par WhatsApp.)</span></div>
+  <div class="kpis" style="grid-template-columns:1fr 1fr"><div class="kpi"><div class="l">Clients en retard</div><div class="v" style="color:var(--red)">${rows.length}</div></div><div class="kpi"><div class="l">Avec n° WhatsApp</div><div class="v">${withPhone.length}</div></div></div>
+  <div class="card"><h2 style="margin-bottom:8px">À relancer</h2>${withPhone.length?withPhone.map(({l,s})=>{const c=CLIENTS.find(x=>x.id===l.data.clientId);const dates=missedDates(l).map(d=>fmtDate(d));return `<div class="item"><div style="flex:1"><div class="nm">${esc(clientName(l.data.clientId))}</div><div class="sb">${s.arrearsDays} j de retard · ${money(s.arrears)}${dates.length?` · manqué : ${dates.slice(-3).join(", ")}${dates.length>3?"…":""}`:""}</div></div><div class="act"><button class="btn green" onclick="remindWhatsApp('${l.id}')">📲 Rappel WhatsApp</button></div></div>`;}).join(""):`<div class="empty">Aucun client en retard avec un numéro. 🎉</div>`}</div>
+  ${noPhone.length?`<div class="card"><h2 style="margin-bottom:8px">En retard sans numéro (${noPhone.length})</h2><div class="sb" style="margin-bottom:8px">Ajoutez leur numéro (fiche client) pour pouvoir les relancer.</div>${noPhone.map(({l,s})=>`<div class="mv"><div><div class="nm">${esc(clientName(l.data.clientId))}</div><div class="sb">${s.arrearsDays} j · ${money(s.arrears)}</div></div><div class="sp"></div>${canEdit()?`<button class="btn ghost sm" onclick="openCli('${l.data.clientId}')">✏️ n°</button>`:""}</div>`).join("")}</div>`:""}`;
+}
 
 /* ---------- JOURNAL DES RETARDS ---------- */
 function renderRetards(el){
@@ -587,13 +711,13 @@ function renderCarnet(el){
   if(!c){el.innerHTML=`<div class="empty">Sélectionnez un client depuis l'onglet Clients (bouton 📖).</div>`;return;}
   const loans=LOANS.filter(l=>l.data.clientId===c.id).map(l=>({l,s:loanStats(l)})).sort((a,b)=>(b.l.data.startDate||"").localeCompare(a.l.data.startDate||""));
   el.innerHTML=`
-  <div class="searchbar no-print"><div class="row"><button class="btn alt" onclick="go('clients')">← Clients</button><button class="btn" onclick="window.print()">🖨️ Imprimer</button>${c.phone?`<button class="btn green" onclick="sendCarnetWhatsApp('${c.id}')">📲 WhatsApp</button>`:`<span class="status" style="align-self:center">Ajoutez un n° pour WhatsApp</span>`}</div></div>
-  <div class="card"><img src="${LOGO}" alt="AFRIKAPITAL" style="height:40px;margin-bottom:8px"><div class="topbar" style="background:none;border:none;padding:0"><h2>${esc(c.name)}</h2><div class="status">AFRIKAPITAL · ${fmtDate(todayISO())}</div></div><div class="sb">${esc(c.phone||"")}${c.activity?" · "+esc(c.activity):""}</div></div>
+  <div class="searchbar no-print"><div class="row"><button class="btn alt" onclick="go('clients')">← Clients</button>${canEdit()?`<button class="btn" onclick="window.print()">🖨️ Imprimer</button><button class="btn alt" onclick="savePDF('carnet-${(c.name||'').replace(/[^a-zA-Z0-9]+/g,'_')}-${todayISO()}')">📄 PDF</button>`:""}${c.phone?`<button class="btn green" onclick="sendCarnetWhatsApp('${c.id}')">📲 WhatsApp</button>`:`<span class="status" style="align-self:center">Ajoutez un n° pour WhatsApp</span>`}</div></div>
+  <div class="card"><img src="${LOGO}" alt="AFRIKAPITAL" style="height:40px;margin-bottom:8px"><div class="phead"><h2>${esc(c.name)}</h2><div class="status">AFRIKAPITAL · ${fmtDate(todayISO())}</div></div><div class="sb">${esc(c.phone||"")}${c.activity?" · "+esc(c.activity):""}</div></div>
   ${loans.length?loans.map(({l,s})=>{
     const t=todayISO();const pays=(l.data.payments||[]);
     // calendrier jour par jour de début à aujourd'hui (borné à l'échéance)
     const lastDay=(t<s.end)?t:s.end;
-    let cells="";let dd=addDays(s.start,1);let guard=0;
+    let cells="";let dd=s.start;let guard=0;
     while(dd<=lastDay && guard<400){
       const p=pays.filter(x=>x.date===dd);
       const paidThatDay=p.length>0;const isRet=p.some(x=>x.kind==="retard");
@@ -602,7 +726,7 @@ function renderCarnet(el){
       cells+=`<div title="${fmtDate(dd)}" style="width:30px;height:30px;border-radius:6px;background:${col};display:grid;place-items:center;font-size:12px;font-weight:700">${mk}</div>`;
       dd=addDays(dd,1);guard++;
     }
-    return `<div class="card"><div class="topbar" style="background:none;border:none;padding:0"><h2 style="font-size:15px">Prêt du ${fmtDate(s.start)}</h2><span class="pill ${s.status==="retard"?"red":(s.status==="solde"?"gray":"green")}">${s.status}</span></div>
+    return `<div class="card"><div class="phead"><h2 style="font-size:15px">Prêt du ${fmtDate(s.start)}</h2><span class="pill ${s.status==="retard"?"red":(s.status==="solde"?"gray":"green")}">${s.status}</span></div>
       <div class="bal"><span>Capital → Total</span><b>${money(s.cap)} → ${money(s.total)}</b></div>
       <div class="bal"><span>Journalier · Durée</span><b>${money(s.daily)} · ${s.dur} j</b></div>
       <div class="bal"><span>Début → Échéance</span><b>${fmtDate(s.start)} → ${fmtDate(s.end)}</b></div>
@@ -683,12 +807,42 @@ function renderActifs(el){
   const rows=LOANS.map(l=>({l,s:loanStats(l)})).filter(r=>r.s.status!=="solde").sort((a,b)=>a.s.end.localeCompare(b.s.end));
   const tCap=rows.reduce((x,r)=>x+r.s.cap,0),tRest=rows.reduce((x,r)=>x+r.s.balance,0),tDay=rows.reduce((x,r)=>x+r.s.daily,0);
   el.innerHTML=`
-  <div class="searchbar no-print"><button class="btn" onclick="window.print()">🖨️ Imprimer</button></div>
-  <div class="card"><img src="${LOGO}" alt="AFRIKAPITAL" style="height:40px;margin-bottom:8px"><div class="topbar" style="background:none;border:none;padding:0"><h2>Prêts actifs — ${rows.length}</h2><div class="status">AFRIKAPITAL · ${fmtDate(todayISO())}</div></div>
+  <div class="searchbar no-print">${canEdit()?`<button class="btn" onclick="window.print()">🖨️ Imprimer</button><button class="btn alt" onclick="savePDF('prets-actifs-${todayISO()}')">📄 PDF</button>`:""}</div>
+  <div class="card"><img src="${LOGO}" alt="AFRIKAPITAL" style="height:40px;margin-bottom:8px"><div class="phead"><h2>Prêts actifs — ${rows.length}</h2><div class="status">AFRIKAPITAL · ${fmtDate(todayISO())}</div></div>
   <div style="overflow-x:auto">${rows.length?`<table style="width:100%;border-collapse:collapse;font-size:13.5px" class="print-table">
     <thead><tr style="text-align:left;border-bottom:2px solid var(--ink)"><th>Client</th><th>Début</th><th>Fin</th><th style="text-align:right">Jrs rest.</th><th style="text-align:right">Capital</th><th style="text-align:right">Journ.</th><th style="text-align:right">Reste</th><th>Statut</th></tr></thead>
     <tbody>${rows.map(({l,s})=>{const rem=Math.max(0,diffDays(todayISO(),s.end));return `<tr style="border-bottom:1px solid var(--line)"><td>${esc(clientName(l.data.clientId))}</td><td>${fmtDate(s.start)}</td><td>${fmtDate(s.end)}</td><td style="text-align:right">${rem}</td><td style="text-align:right">${money(s.cap)}</td><td style="text-align:right">${money(s.daily)}</td><td style="text-align:right">${money(s.balance)}</td><td>${s.status}</td></tr>`;}).join("")}
     <tr style="font-weight:800;border-top:2px solid var(--ink)"><td colspan="4">TOTAL — ${rows.length}</td><td style="text-align:right">${money(tCap)}</td><td style="text-align:right">${money(tDay)}</td><td style="text-align:right">${money(tRest)}</td><td></td></tr></tbody></table>`:`<div class="empty">Aucun prêt actif.</div>`}</div></div>`;
+}
+
+/* ---------- ACTIVITE PAR COLLECTRICE ---------- */
+let _actDate=null;
+function userLabel(by){if(!by||by==="?")return "Inconnu";if(by==="import")return "Import";return String(by).split("@")[0];}
+function activityByUser(date){
+  const map={};const get=e=>(map[e]=map[e]||{loan:0,retard:0,solde:0,sav:0,retrait:0,dep:0,ops:0});
+  LOANS.forEach(l=>(l.data.payments||[]).forEach(p=>{if(p.date===date){const u=get(p.by||"?");const a=+p.amount||0;if(p.kind==="solde")u.solde+=a;else if(p.kind==="retard")u.retard+=a;else u.loan+=a;u.ops++;}}));
+  SAV.forEach(s=>{if(s.data.date===date){const u=get(s.data.by||"?");if(s.data.type==="retrait")u.retrait+=+s.data.amount||0;else u.sav+=+s.data.amount||0;u.ops++;}});
+  EXP.forEach(e=>{if(e.data.date===date){const u=get(e.data.by||"?");u.dep+=+e.data.amount||0;u.ops++;}});
+  return map;
+}
+function renderActivite(el){
+  const t=_actDate||todayISO();
+  const map=activityByUser(t);
+  const users=Object.keys(map).sort((a,b)=>{const A=map[a],B=map[b];return (B.loan+B.retard+B.solde+B.sav)-(A.loan+A.retard+A.solde+A.sav);});
+  let gEnc=0;users.forEach(u=>{gEnc+=map[u].loan+map[u].retard+map[u].solde+map[u].sav;});
+  el.innerHTML=`
+  <div class="searchbar no-print"><div class="row"><label style="margin:0;align-self:center">Jour :</label><input type="date" id="actDate" value="${t}" onchange="_actDate=this.value;renderActivite($('content'))">${canEdit()?`<button class="btn" onclick="window.print()">🖨️</button><button class="btn alt" onclick="savePDF('collectrices-${t}')">📄 PDF</button>`:""}</div></div>
+  <div class="card"><img src="${LOGO}" alt="AFRIKAPITAL" style="height:40px;margin-bottom:8px"><div class="phead"><h2>Encaissements par collectrice</h2><div class="status">${fmtDate(t)} · total encaissé ${money(gEnc)}</div></div></div>
+  ${users.length?users.map(u=>{const m=map[u];const enc=m.loan+m.retard+m.solde+m.sav;return `
+    <div class="card"><div class="phead"><h2 style="font-size:15px">${esc(userLabel(u))}</h2><span class="pill green">${money(enc)} encaissé</span></div>
+      <div class="bal"><span>Versements prêts</span><b style="color:var(--green)">${money(m.loan)}</b></div>
+      ${m.retard>0?`<div class="bal"><span>Rattrapages retard</span><b style="color:var(--green)">${money(m.retard)}</b></div>`:""}
+      ${m.solde>0?`<div class="bal"><span>Soldes de prêts</span><b style="color:var(--green)">${money(m.solde)}</b></div>`:""}
+      <div class="bal"><span>Épargne collectée</span><b style="color:var(--green)">${money(m.sav)}</b></div>
+      ${m.retrait>0?`<div class="bal"><span>Retraits épargne remis</span><b style="color:var(--red)">${money(m.retrait)}</b></div>`:""}
+      ${m.dep>0?`<div class="bal"><span>Dépenses enregistrées</span><b style="color:var(--red)">${money(m.dep)}</b></div>`:""}
+      <div class="bal"><span>Nombre d'opérations</span><b>${m.ops}</b></div>
+    </div>`;}).join(""):`<div class="empty">Aucune activité ce jour.</div>`}`;
 }
 
 /* ---------- JOURNEE : ENTREES / SORTIES ---------- */
@@ -697,7 +851,7 @@ function dayMovements(date){
   const mv=[];
   LOANS.forEach(l=>{
     (l.data.payments||[]).forEach(p=>{if(p.date===date){const cat=p.kind==="solde"?"Solde de prêt":(p.kind==="retard"?"Rattrapage prêt":"Versement prêt");mv.push({dir:"in",cat,who:clientName(l.data.clientId),amount:+p.amount||0});}});
-    if(l.data.startDate===date){mv.push({dir:"out",cat:"Prêt accordé (capital)",who:clientName(l.data.clientId),amount:+l.data.capital||0});}
+    if((l.data.disbursedDate||l.data.startDate)===date){mv.push({dir:"out",cat:"Prêt accordé (capital)",who:clientName(l.data.clientId),amount:+l.data.capital||0});}
   });
   SAV.forEach(s=>{if(s.data.date===date){const isRet=s.data.type==="retrait";mv.push({dir:isRet?"out":"in",cat:(isRet?"Retrait épargne":"Dépôt épargne")+" "+((s.data.plan||"express")==="koor"?"Koor":"Express"),who:clientName(s.data.clientId),amount:+s.data.amount||0});}});
   EXP.forEach(e=>{if(e.data.date===date){mv.push({dir:"out",cat:"Dépense"+(e.data.cat==="investissement"?" (invest.)":""),who:e.data.label,amount:+e.data.amount||0});}});
@@ -710,8 +864,8 @@ function renderMouv(el){
   const ins=mv.filter(m=>m.dir==="in"),outs=mv.filter(m=>m.dir==="out");
   const totIn=ins.reduce((a,m)=>a+m.amount,0),totOut=outs.reduce((a,m)=>a+m.amount,0);
   el.innerHTML=`
-  <div class="searchbar no-print"><div class="row"><label style="margin:0;align-self:center">Jour :</label><input type="date" id="mvDate" value="${t}" onchange="_mvDate=this.value;renderMouv($('content'))"><button class="btn" onclick="window.print()">🖨️</button></div></div>
-  <div class="card"><img src="${LOGO}" alt="AFRIKAPITAL" style="height:40px;margin-bottom:8px"><div class="topbar" style="background:none;border:none;padding:0"><h2>Journée du ${fmtDate(t)}</h2><div class="status">AFRIKAPITAL — entrées / sorties</div></div></div>
+  <div class="searchbar no-print"><div class="row"><label style="margin:0;align-self:center">Jour :</label><input type="date" id="mvDate" value="${t}" onchange="_mvDate=this.value;renderMouv($('content'))">${canEdit()?`<button class="btn" onclick="window.print()">🖨️</button><button class="btn alt" onclick="savePDF('journee-${t}')">📄 PDF</button>`:""}</div></div>
+  <div class="card"><img src="${LOGO}" alt="AFRIKAPITAL" style="height:40px;margin-bottom:8px"><div class="phead"><h2>Journée du ${fmtDate(t)}</h2><div class="status">AFRIKAPITAL — entrées / sorties</div></div></div>
   <div class="kpis" style="grid-template-columns:repeat(3,1fr)">
     <div class="kpi"><div class="l">Entrées</div><div class="v" style="color:var(--green);font-size:16px">${money(totIn)}</div></div>
     <div class="kpi"><div class="l">Sorties</div><div class="v" style="color:var(--red);font-size:16px">${money(totOut)}</div></div>
@@ -725,17 +879,18 @@ function renderMouv(el){
 let _jcDate=null;
 function renderJournal(el){
   const d=_jcDate||todayISO();
-  const sheet=LOANS.map(l=>({l,s:loanStats(l)})).filter(r=>d>r.s.start&&d<=r.s.end).map(({l,s})=>{
+  const sheet=LOANS.map(l=>({l,s:loanStats(l)})).filter(r=>d>=r.s.start&&r.s.status!=="solde").map(({l,s})=>{
     const pays=(l.data.payments||[]).filter(p=>p.date===d);const amt=pays.reduce((x,p)=>x+(+p.amount||0),0);const miss=(l.data.misses||[]).some(m=>m.date===d);
-    return {name:clientName(l.data.clientId),due:s.daily,amt,cnt:pays.length,paid:amt>0,miss};
+    return {name:clientName(l.data.clientId),due:s.daily,reste:s.balance,amt,cnt:pays.length,paid:amt>0,miss,arr:s.arrearsDays};
   }).sort((a,b)=>a.name.localeCompare(b.name));
-  const dPaid=sheet.filter(r=>r.paid).length,dMiss=sheet.filter(r=>!r.paid&&r.miss).length,dTot=sheet.reduce((x,r)=>x+r.amt,0);
+  const dPaid=sheet.filter(r=>r.paid).length,dMiss=sheet.filter(r=>!r.paid).length,dTot=sheet.reduce((x,r)=>x+r.amt,0);
   const map={};LOANS.forEach(l=>{(l.data.payments||[]).forEach(p=>{(map[p.date]=map[p.date]||{pay:0,nbPay:0,nbMiss:0}).pay+=+p.amount||0;map[p.date].nbPay++;});(l.data.misses||[]).forEach(m=>{(map[m.date]=map[m.date]||{pay:0,nbPay:0,nbMiss:0}).nbMiss++;});});
   const days=Object.keys(map).sort().reverse();
   el.innerHTML=`
-  <div class="searchbar no-print"><div class="row"><input type="date" id="jcDate" value="${d}" onchange="_jcDate=this.value;VIEWS.journal.render($('content'))" style="max-width:180px"><button class="btn" onclick="window.print()">🖨️ Imprimer</button></div></div>
-  <div class="card"><img src="${LOGO}" alt="AFRIKAPITAL" style="height:40px;margin-bottom:8px"><div class="topbar" style="background:none;border:none;padding:0"><h2>Collecte du ${fmtDate(d)}</h2><div class="status">AFRIKAPITAL</div></div>
-  <div style="overflow-x:auto">${sheet.length?`<table style="width:100%;border-collapse:collapse;font-size:13.5px" class="print-table"><thead><tr style="text-align:left;border-bottom:2px solid var(--ink)"><th>Client</th><th style="text-align:right">Dû</th><th style="text-align:right">Versé</th><th>Statut</th></tr></thead><tbody>${sheet.map(r=>`<tr style="border-bottom:1px solid var(--line)"><td>${esc(r.name)}</td><td style="text-align:right">${money(r.due)}</td><td style="text-align:right;color:var(--green)">${r.amt>0?money(r.amt)+(r.cnt>1?" ×"+r.cnt:""):"—"}</td><td>${r.paid?"Payé":(r.miss?"Impayé":"—")}</td></tr>`).join("")}<tr style="font-weight:800;border-top:2px solid var(--ink)"><td>TOTAL — ${dPaid} payé(s), ${dMiss} impayé(s)</td><td></td><td style="text-align:right">${money(dTot)}</td><td></td></tr></tbody></table>`:`<div class="empty">Aucune collecte prévue ce jour.</div>`}</div></div>
+  <div class="searchbar no-print"><div class="row"><input type="date" id="jcDate" value="${d}" onchange="_jcDate=this.value;VIEWS.journal.render($('content'))" style="max-width:180px">${canEdit()?`<button class="btn" onclick="window.print()">🖨️ Imprimer</button><button class="btn alt" onclick="savePDF('feuille-collecte-${d}')">📄 PDF</button>`:""}</div></div>
+  <div class="card jc-sheet"><img src="${LOGO}" alt="AFRIKAPITAL" style="height:44px;margin-bottom:8px"><div class="phead"><h2>Feuille de collecte — ${fmtDate(d)}</h2><div class="status">AFRIKAPITAL · ${sheet.length} client(s)</div></div>
+  <div class="jc-scroll">${sheet.length?`<table class="jc-table print-table"><thead><tr><th style="text-align:left">N°</th><th style="text-align:left">Client</th><th style="text-align:right">Attendu</th><th style="text-align:right">Reste dû</th><th style="text-align:right">Reçu</th><th style="text-align:center">Signature</th></tr></thead><tbody>${sheet.map((r,i)=>`<tr><td>${i+1}</td><td class="jc-name">${esc(r.name)}${r.arr>0?` <span style="color:var(--red);font-weight:400;font-size:11px">(${r.arr}j retard)</span>`:""}</td><td style="text-align:right">${money(r.due)}</td><td style="text-align:right">${money(r.reste)}</td><td style="text-align:right">${r.amt>0?`<b style="color:var(--green)">${money(r.amt)}</b>`:'<span style="color:#bbb">………</span>'}</td><td></td></tr>`).join("")}<tr class="jc-total"><td></td><td>TOTAL — ${dPaid} payé(s) / ${sheet.length}</td><td></td><td></td><td style="text-align:right">${money(dTot)}</td><td></td></tr></tbody></table>`:`<div class="empty">Aucune collecte prévue ce jour.</div>`}</div>
+  <div class="jc-sign">Collectrice : ______________________   Signature : ______________________</div></div>
   <div class="card no-print"><h2 style="margin-bottom:8px">Historique par jour</h2><div style="overflow-x:auto">${days.length?`<table style="width:100%;border-collapse:collapse;font-size:13.5px"><thead><tr style="text-align:left;border-bottom:2px solid var(--ink)"><th>Date</th><th style="text-align:right">Versements</th><th style="text-align:right">Encaissé</th><th style="text-align:right">Impayés</th></tr></thead><tbody>${days.slice(0,120).map(dd=>`<tr style="border-bottom:1px solid var(--line);cursor:pointer" onclick="_jcDate='${dd}';VIEWS.journal.render($('content'));window.scrollTo(0,0)"><td>${fmtDate(dd)}</td><td style="text-align:right">${map[dd].nbPay}</td><td style="text-align:right;color:var(--green);font-weight:700">${money(map[dd].pay)}</td><td style="text-align:right;color:var(--red)">${map[dd].nbMiss||"—"}</td></tr>`).join("")}</tbody></table>`:`<div class="empty">Aucune collecte enregistrée.</div>`}</div></div>`;
 }
 
@@ -793,8 +948,8 @@ function renderArchive(el){
   const nb=all.length,soldes=all.filter(r=>r.s.status==="solde").length,actifs=all.filter(r=>r.s.status!=="solde").length;
   const capTot=all.reduce((x,r)=>x+r.s.cap,0),intTot=all.reduce((x,r)=>x+(r.s.total-r.s.cap),0);
   el.innerHTML=`
-  <div class="searchbar no-print"><div class="row"><input type="text" id="arcQ" value="${esc(_arcQ)}" placeholder="Rechercher un client…" oninput="_arcQ=this.value;renderArchive($('content'))"><button class="btn" onclick="window.print()">🖨️</button></div></div>
-  <div class="card"><img src="${LOGO}" alt="AFRIKAPITAL" style="height:40px;margin-bottom:8px"><div class="topbar" style="background:none;border:none;padding:0"><h2>Archive des prêts — ${nb}</h2><div class="status">AFRIKAPITAL · ${fmtDate(todayISO())}</div></div>
+  <div class="searchbar no-print"><div class="row"><input type="text" id="arcQ" value="${esc(_arcQ)}" placeholder="Rechercher un client…" oninput="_arcQ=this.value;renderArchive($('content'))">${canEdit()?`<button class="btn" onclick="window.print()">🖨️</button><button class="btn alt" onclick="savePDF('archive-prets-${todayISO()}')">📄 PDF</button>`:""}</div></div>
+  <div class="card"><img src="${LOGO}" alt="AFRIKAPITAL" style="height:40px;margin-bottom:8px"><div class="phead"><h2>Archive des prêts — ${nb}</h2><div class="status">AFRIKAPITAL · ${fmtDate(todayISO())}</div></div>
     <div class="sb" style="margin:6px 0">${actifs} en cours · ${soldes} soldés · capital cumulé ${money(capTot)} · intérêts prévus ${money(intTot)}</div>
     <div style="overflow-x:auto">${rows.length?`<table style="width:100%;border-collapse:collapse;font-size:13px" class="print-table"><thead><tr style="text-align:left;border-bottom:2px solid var(--ink)"><th>Client</th><th style="text-align:right">Capital</th><th style="text-align:right">Total</th><th style="text-align:right">Payé</th><th style="text-align:right">Reste</th><th>Début</th><th>Statut</th></tr></thead><tbody>${rows.map(({l,s})=>`<tr style="border-bottom:1px solid var(--line)"><td>${esc(clientName(l.data.clientId))}</td><td style="text-align:right">${money(s.cap)}</td><td style="text-align:right">${money(s.total)}</td><td style="text-align:right;color:var(--green)">${money(s.paid)}</td><td style="text-align:right">${money(s.balance)}</td><td>${fmtDate(s.start)}</td><td>${s.status==="solde"?"✅ soldé":(s.status==="retard"?"⏰ retard":"actif")}</td></tr>`).join("")}</tbody></table>`:`<div class="empty">Aucun prêt.</div>`}</div>
   </div>`;
@@ -812,9 +967,9 @@ function renderInterets(el){
   const months=Object.keys(byMonth).sort().reverse();
   const thisYm=todayISO().slice(0,7);const cur=byMonth[thisYm]||{col:0,int:0,nb:0};
   el.innerHTML=`
-  <div class="searchbar no-print"><div class="row"><div class="status" style="align-self:center;flex:1">Intérêt = 10 % du capital, reconnu au fil des versements encaissés.</div><button class="btn" onclick="window.print()">🖨️</button></div></div>
+  <div class="searchbar no-print"><div class="row"><div class="status" style="align-self:center;flex:1">Intérêt = 10 % du capital, reconnu au fil des versements encaissés.</div>${canEdit()?`<button class="btn" onclick="window.print()">🖨️</button><button class="btn alt" onclick="savePDF('interets-${todayISO()}')">📄 PDF</button>`:""}</div></div>
   <div class="kpis" style="grid-template-columns:1fr 1fr"><div class="kpi"><div class="l">Intérêts ce mois (${moisLabel(thisYm)})</div><div class="v" style="color:var(--gold);font-size:16px">${money(cur.int)}</div></div><div class="kpi"><div class="l">Intérêts cumulés</div><div class="v" style="font-size:16px">${money(grandInt)}</div></div></div>
-  <div class="card"><img src="${LOGO}" alt="AFRIKAPITAL" style="height:40px;margin-bottom:8px"><div class="topbar" style="background:none;border:none;padding:0"><h2>Intérêts gagnés par mois</h2><div class="status">AFRIKAPITAL · ${fmtDate(todayISO())}</div></div>
+  <div class="card"><img src="${LOGO}" alt="AFRIKAPITAL" style="height:40px;margin-bottom:8px"><div class="phead"><h2>Intérêts gagnés par mois</h2><div class="status">AFRIKAPITAL · ${fmtDate(todayISO())}</div></div>
     <div style="overflow-x:auto">${months.length?`<table style="width:100%;border-collapse:collapse;font-size:13.5px" class="print-table"><thead><tr style="text-align:left;border-bottom:2px solid var(--ink)"><th>Mois</th><th style="text-align:right">Encaissé</th><th style="text-align:right">Dont intérêts</th><th style="text-align:right">Versements</th></tr></thead><tbody>${months.map(ym=>`<tr style="border-bottom:1px solid var(--line)"><td>${moisLabel(ym)}</td><td style="text-align:right">${money(byMonth[ym].col)}</td><td style="text-align:right;color:var(--gold);font-weight:700">${money(byMonth[ym].int)}</td><td style="text-align:right">${byMonth[ym].nb}</td></tr>`).join("")}<tr style="font-weight:800;border-top:2px solid var(--ink)"><td>TOTAL</td><td style="text-align:right">${money(grandCol)}</td><td style="text-align:right;color:var(--gold)">${money(grandInt)}</td><td></td></tr></tbody></table>`:`<div class="empty">Aucun versement encaissé.</div>`}</div>
     <p class="sb" style="margin-top:8px">Estimation : sur chaque versement, la part d'intérêt correspond à la proportion intérêt/total du prêt. Sur toute la durée, cela totalise exactement les 10 % du capital.</p>
   </div>`;
@@ -867,30 +1022,55 @@ function projectWithRenewals(days,besoin){
   }
   return {events,minT,minD,startCash,treasuryToday:treasury+0,besoin:besoin>0?besoin:0,afterBesoin:startCash-(besoin>0?besoin:0)};
 }
+function projectRenewals2y(besoin){
+  const DAYS=730;
+  const startClose=closeFor(todayISO());const startCash=(startClose===null?0:startClose);
+  let treasury=startCash-(besoin>0?besoin:0);
+  const loans=LOANS.map(l=>({s:loanStats(l),name:clientName(l.data.clientId)})).filter(x=>x.s.status!=="solde"&&x.s.daily>0)
+    .map(x=>({rem:x.s.balance,daily:x.s.daily,cap:x.s.cap,name:x.name,done:false}));
+  const savDaily=CLIENTS.reduce((a,c)=>a+((c.epExpress&&+c.epExpress.daily)||0)+((c.epKoor&&+c.epKoor.daily)||0),0);
+  const events=[];const months={};let minT=treasury,minD=todayISO();let totalRenew=0,nbRenew=0;
+  for(let i=1;i<=DAYS;i++){
+    const date=addDays(todayISO(),i);let loanIn=0;const finishing=[];
+    loans.forEach(L=>{if(L.rem>0){const p=Math.min(L.daily,L.rem);loanIn+=p;L.rem-=p;if(L.rem<=0&&!L.done){L.done=true;finishing.push(L);}}});
+    const savIn=savDaily;treasury+=loanIn+savIn;
+    let renewOut=0;const clients=[];
+    finishing.forEach(L=>{renewOut+=L.cap;clients.push({name:L.name,cap:L.cap});loans.push({rem:Math.round(L.cap*(1+RATE/100)),daily:L.daily,cap:L.cap,name:L.name,done:false});});
+    treasury-=renewOut;totalRenew+=renewOut;nbRenew+=clients.length;
+    if(clients.length)events.push({date,clients,renewOut,dayIn:loanIn+savIn,treasury});
+    const ym=date.slice(0,7);const m=(months[ym]=months[ym]||{enc:0,ren:0,end:0,nb:0});m.enc+=loanIn+savIn;m.ren+=renewOut;m.nb+=clients.length;m.end=treasury;
+    if(treasury<minT){minT=treasury;minD=date;}
+  }
+  return {events,months,minT,minD,finalT:treasury,startCash,savDaily,totalRenew,nbRenew,besoin:besoin>0?besoin:0};
+}
+let _renShow="jour";
 function renderRenouv(el){
   const rows=LOANS.map(l=>({l,s:loanStats(l)})).filter(r=>r.s.status!=="solde")
     .map(r=>({...r,pct:r.s.total?Math.min(100,Math.round(r.s.paid/r.s.total*100)):0,instRem:Math.max(0,Math.ceil(r.s.balance/(r.s.daily||1)))}))
     .sort((a,b)=>a.s.balance-b.s.balance);
-  const ready=rows.filter(r=>r.pct>=90);
-  const b=_besoin;const F=projectWithRenewals(30,b);
+  const b=_besoin;const F=projectRenewals2y(b);
   const col=v=>v>=0?"var(--teal)":"var(--red)";
-  const besoinLine=b>0?`<div class="bal"><span>− Prêt que vous voulez accorder aujourd'hui</span><b style="color:var(--red)">-${money(b)} FCFA</b></div><div class="bal"><span>= Caisse après ce prêt</span><b style="color:${col(F.afterBesoin)}">${money(F.afterBesoin)} FCFA</b></div>`:"";
+  const besoinLine=b>0?`<div class="bal"><span>− Prêt accordé aujourd'hui</span><b style="color:var(--red)">-${money(b)} FCFA</b></div>`:"";
   const verdict=F.minT>=0
-    ?`<div class="status" style="background:var(--green-l);color:#0f7a3d;margin-bottom:10px">✓ La trésorerie reste <b>positive</b> sur 30 jours (au plus bas ${money(F.minT)} le ${fmtDate(F.minD)}), en re-prêtant à chaque client qui termine.</div>`
-    :`<div class="status" style="background:var(--red-l);color:#b02a2a;margin-bottom:10px">⚠️ La trésorerie deviendrait <b>négative</b> : ${money(F.minT)} le ${fmtDate(F.minD)}. Il faudra étaler les renouvellements ou garder plus de liquidités.</div>`;
+    ?`<div class="status" style="background:var(--green-l);color:#0f7a3d;margin:10px 0">✓ Sur 2 ans, la trésorerie reste <b>positive</b>. Au plus bas : ${money(F.minT)} le ${fmtDate(F.minD)}. Trésorerie finale estimée : <b>${money(F.finalT)}</b>.</div>`
+    :`<div class="status" style="background:var(--red-l);color:#b02a2a;margin:10px 0">⚠️ La trésorerie deviendrait <b>négative</b> : ${money(F.minT)} le ${fmtDate(F.minD)}. Il faudrait étaler les renouvellements ou garder plus de liquidités.</div>`;
+  const monthKeys=Object.keys(F.months).sort();
+  const monthTable=`<div class="jc-scroll"><table class="jc-table" style="font-size:13px"><thead><tr><th style="text-align:left">Mois</th><th style="text-align:right">Encaissé</th><th style="text-align:right">Renouvelé</th><th style="text-align:right">Renouv.</th><th style="text-align:right">Trésorerie fin</th></tr></thead><tbody>${monthKeys.map(ym=>{const m=F.months[ym];return `<tr><td>${moisLabel(ym)}</td><td style="text-align:right">${money(m.enc)}</td><td style="text-align:right">${money(m.ren)}</td><td style="text-align:right">${m.nb}</td><td style="text-align:right;color:${col(m.end)};font-weight:700">${money(m.end)}</td></tr>`;}).join("")}</tbody></table></div>`;
+  const eventsList=`<div class="jc-scroll"><table class="jc-table" style="font-size:13px"><thead><tr><th style="text-align:left">Date</th><th style="text-align:left">Clients à renouveler</th><th style="text-align:right">À décaisser</th><th style="text-align:right">Solde trésorerie</th></tr></thead><tbody>${F.events.length?F.events.map(e=>`<tr><td style="white-space:nowrap">${fmtDate(e.date)}</td><td>${e.clients.map(c=>esc(c.name)).join(", ")}</td><td style="text-align:right;white-space:nowrap;color:var(--red)">-${money(e.renewOut)}</td><td style="text-align:right;white-space:nowrap;color:${col(e.treasury)};font-weight:700">${money(e.treasury)}</td></tr>`).join(""):`<tr><td colspan="4" class="empty">Aucun renouvellement.</td></tr>`}</tbody></table></div><p class="sb" style="margin-top:8px">Solde trésorerie = trésorerie de la veille + collecte du jour (prêts + épargne) − montant décaissé pour les renouvellements.</p>`;
   el.innerHTML=`
-  <div class="status" style="margin-bottom:10px">Prévision sur 30 jours : les clients qui vont <b>terminer</b> (donc à renouveler) et la <b>trésorerie</b> ce jour-là. Hypothèse : vous re-prêtez le <b>même capital</b> à chaque client qui finit, et il repaie dès le lendemain.</div>
-  <div class="card"><h2 style="margin-bottom:8px">📈 Trésorerie & renouvellements (prévision)</h2>
+  <div class="status" style="margin-bottom:10px">Projection sur <b>2 ans</b>. Chaque jour : on <b>collecte</b> les versements des prêts <b>et</b> les épargnes, puis on <b>renouvelle</b> (re-prêt du même capital) les clients qui terminent. Pour chaque date de renouvellement : les <b>clients</b> concernés et la <b>trésorerie disponible</b> ce jour-là.</div>
+  <div class="card"><h2 style="margin-bottom:8px">📈 Trésorerie & renouvellements — 2 ans</h2>
     <div class="bal"><span>Caisse aujourd'hui</span><b>${money(F.startCash)} FCFA</b></div>
-    <label style="margin-top:8px">Combien voulez-vous prêter aujourd'hui ? (en plus des renouvellements)</label>
+    <div class="bal"><span>Épargne collectée / jour</span><b style="color:var(--green)">+${money(F.savDaily)} FCFA</b></div>
+    <label style="margin-top:8px">Prêt supplémentaire accordé aujourd'hui (optionnel)</label>
     <input type="number" id="besoinInp" value="${b||""}" placeholder="ex. 200000" onchange="_besoin=+this.value||0;renderRenouv($('content'))">
     ${besoinLine}
     ${verdict}
-    <h2 style="margin:12px 0 6px;font-size:15px">Clients à renouveler (prévision)</h2>
-    ${F.events.length?F.events.map(e=>`<div class="mv"><div><div class="nm">${fmtDate(e.date)} — ${e.clients.map(c=>esc(c.name)).join(", ")}</div><div class="sb">Re-prêt ${money(e.renewOut)} · versements reçus ${money(e.inflow)}</div></div><div class="sp"></div><b style="color:${col(e.treasury)}">${money(e.treasury)}</b></div>`).join(""):`<div class="empty">Aucun client ne termine dans les 30 jours.</div>`}
-    <p class="sb" style="margin-top:8px">Chiffres estimés si les clients paient chaque jour. Le montant « à prêter aujourd'hui » sort de la caisse aujourd'hui (ses futurs versements ne sont pas comptés, par prudence).</p>
+    <div class="bal"><span>Total renouvellements (2 ans)</span><b>${money(F.totalRenew)} · ${F.nbRenew} prêts</b></div>
   </div>
-  <div class="card"><h2 style="margin-bottom:8px">Bientôt terminés (≥ 90 % remboursé) — ${ready.length}</h2>${ready.length?ready.map(({l,s,pct,instRem})=>`<div class="mv"><div><div class="nm">${esc(clientName(l.data.clientId))}</div><div class="sb">${pct}% remboursé · reste ${money(s.balance)} (~${instRem} versement${instRem>1?"s":""})</div></div><div class="sp"></div><span class="pill ${s.balance<=0?"green":"o"}">${pct}%</span></div>`).join(""):`<div class="empty">Aucun prêt proche de la fin.</div>`}</div>
+  <div class="card"><div class="phead" style="margin-bottom:8px"><h2 style="font-size:15px">Détail</h2><div class="row no-print" style="gap:6px"><button class="btn ${_renShow==='mois'?'':'alt'} sm" onclick="_renShow='mois';renderRenouv($('content'))">Par mois</button><button class="btn ${_renShow==='jour'?'':'alt'} sm" onclick="_renShow='jour';renderRenouv($('content'))">Jour par jour</button></div></div>
+    ${_renShow==='mois'?monthTable:eventsList}
+  </div>
   <div class="card"><h2 style="margin-bottom:8px">Tous les prêts actifs — ${rows.length}</h2>${rows.length?rows.map(({l,s,pct,instRem})=>`<div class="mv"><div><div class="nm">${esc(clientName(l.data.clientId))}</div><div class="sb">${pct}% · reste ${money(s.balance)}${s.arrearsDays>0?` · <span style="color:var(--red)">${s.arrearsDays} j retard</span>`:""}</div></div><div class="sp"></div><span class="status">~${instRem} vers.</span></div>`).join(""):`<div class="empty">Aucun prêt actif.</div>`}</div>`;
 }
 
@@ -920,6 +1100,37 @@ async function withRetry(fn,{tries=4,label="Enregistrement"}={}){
   return {ok:false,error:lastErr};
 }
 
+let _pdfLibs=null;
+function ensurePdfLibs(){
+  if(_pdfLibs)return _pdfLibs;
+  _pdfLibs=new Promise((resolve,reject)=>{
+    const need=[];
+    if(!window.html2canvas)need.push("https://cdnjs.cloudflare.com/ajax/libs/html2canvas/1.4.1/html2canvas.min.js");
+    if(!(window.jspdf&&window.jspdf.jsPDF))need.push("https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js");
+    if(!need.length)return resolve();
+    let done=0,failed=false;
+    need.forEach(src=>{const s=document.createElement("script");s.src=src;s.onload=()=>{done++;if(done===need.length)resolve();};s.onerror=()=>{if(!failed){failed=true;reject(new Error("load"));}};document.head.appendChild(s);});
+  });
+  return _pdfLibs;
+}
+async function savePDF(baseName){
+  const el=$("content");if(!el)return;
+  toast("Génération du PDF…");
+  try{await ensurePdfLibs();}catch(e){toast("PDF indisponible — ouverture de l'impression");window.print();return;}
+  const hidden=Array.prototype.slice.call(el.querySelectorAll(".no-print"));
+  hidden.forEach(n=>{n.setAttribute("data-d",n.style.display||"");n.style.display="none";});
+  try{
+    const canvas=await window.html2canvas(el,{scale:2,backgroundColor:"#ffffff",useCORS:true});
+    const jsPDF=window.jspdf.jsPDF;const pdf=new jsPDF("p","mm","a4");
+    const pw=pdf.internal.pageSize.getWidth(),ph=pdf.internal.pageSize.getHeight();
+    const imgW=pw,imgH=canvas.height*imgW/canvas.width;const img=canvas.toDataURL("image/jpeg",0.92);
+    let heightLeft=imgH,position=0;
+    pdf.addImage(img,"JPEG",0,position,imgW,imgH);heightLeft-=ph;
+    while(heightLeft>0){position=heightLeft-imgH;pdf.addPage();pdf.addImage(img,"JPEG",0,position,imgW,imgH);heightLeft-=ph;}
+    pdf.save((baseName||"afrikapital")+".pdf");toast("PDF enregistré");
+  }catch(e){toast("PDF impossible — impression classique");window.print();}
+  finally{hidden.forEach(n=>{n.style.display=n.getAttribute("data-d")||"";n.removeAttribute("data-d");});}
+}
 function close_(id){$(id).classList.remove("show");}
 function subscribe(){
   if(chan)return;
