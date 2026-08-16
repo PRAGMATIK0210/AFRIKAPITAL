@@ -249,7 +249,6 @@ const NAV=[
   {v:"dashboard",ic:"🏠",label:"Tableau de bord",roles:["gerant","collectrice"]},
   {sep:"Activité"},
   {v:"collecte",ic:"📅",label:"Collecte du jour",roles:["gerant","collectrice"]},
-  {v:"retards",ic:"⏰",label:"Journal des retards",roles:["gerant","collectrice"]},
   {v:"relances",ic:"🔔",label:"Relances WhatsApp",roles:["gerant","collectrice"]},
   {v:"clients",ic:"👥",label:"Clients",roles:["gerant","collectrice"]},
   {v:"loans",ic:"💳",label:"Prêts / Crédits",roles:["gerant"]},
@@ -277,7 +276,6 @@ const NAV=[
 const VIEWS={
   dashboard:{title:"Tableau de bord",sub:"Vue d'ensemble",render:renderDashboard},
   collecte:{title:"Collecte du jour",sub:"Un versement par jour",render:renderCollecte},
-  retards:{title:"Journal des retards",sub:"Régler les jours manqués",render:renderRetards},
   relances:{title:"Relances WhatsApp",sub:"Rappels aux clients en retard",render:renderRelances},
   carnet:{title:"Carnet du client",sub:"Détail des versements",render:renderCarnet},
   clients:{title:"Clients",sub:"Répertoire des clients",render:renderClients},
@@ -360,12 +358,16 @@ function renderDashboard(el){
   const epE=SAV.filter(s=>(s.data.plan||"express")==="express").reduce((a,s)=>a+((s.data.type==="retrait")?-1:1)*(+s.data.amount||0),0);
   const epK=SAV.filter(s=>(s.data.plan||"express")==="koor").reduce((a,s)=>a+((s.data.type==="retrait")?-1:1)*(+s.data.amount||0),0);
   const F=(typeof projectWithRenewals==="function")?projectWithRenewals(30,0):{minT:0,minD:t};
+  let myLoan=0,mySav=0;const meMail=ME&&ME.email;
+  LOANS.forEach(l=>(l.data.payments||[]).forEach(p=>{if(p.date===t&&p.by===meMail)myLoan+=+p.amount||0;}));
+  SAV.forEach(s=>{if(s.data.date===t&&s.data.by===meMail&&s.data.type!=="retrait")mySav+=+s.data.amount||0;});
+  const myTotal=myLoan+mySav;
   const alerts=[];
   if(canEdit()&&!cashBase())alerts.push(`<div class="mv" onclick="go('caisse')" style="cursor:pointer;background:var(--gold-l,#f7efdc)"><div><div class="nm">⚙️ Définir le solde de caisse initial</div><div class="sb">Nécessaire pour suivre la trésorerie</div></div><div class="sp"></div><span class="pill o">à faire</span></div>`);
   if(colRemain.length)alerts.push(`<div class="mv" onclick="go('collecte')" style="cursor:pointer"><div><div class="nm">📅 Collecte du jour</div><div class="sb">${colDone}/${colRows.length} faits · reste ${money(colRemainAmt)} à encaisser</div></div><div class="sp"></div><span class="pill ${colRemain.length? 'o':'green'}">${colRemain.length} à faire</span></div>`);
   else if(colRows.length)alerts.push(`<div class="mv" style="background:var(--green-l)"><div><div class="nm">📅 Collecte du jour</div><div class="sb">Tous les ${colRows.length} clients collectés 🎉</div></div><div class="sp"></div><span class="pill green">✓</span></div>`);
   if(svTot&&svDone<svTot)alerts.push(`<div class="mv" onclick="go('koor')" style="cursor:pointer"><div><div class="nm">💰 Épargne du jour</div><div class="sb">${svDone}/${svTot} épargnants collectés</div></div><div class="sp"></div><span class="pill o">${svTot-svDone} à faire</span></div>`);
-  if(retards.length)alerts.push(`<div class="mv" onclick="go('retards')" style="cursor:pointer"><div><div class="nm">⏰ Retards</div><div class="sb">${retards.length} client(s) · ${money(arrAmt)} en retard</div></div><div class="sp"></div><span class="pill red">${retards.length}</span></div>`);
+  if(retards.length)alerts.push(`<div class="mv" onclick="go('relances')" style="cursor:pointer"><div><div class="nm">⏰ Retards</div><div class="sb">${retards.length} client(s) · ${money(arrAmt)} en retard — voir dans le carnet</div></div><div class="sp"></div><span class="pill red">${retards.length}</span></div>`);
   if(finishing)alerts.push(`<div class="mv" onclick="go('renouv')" style="cursor:pointer"><div><div class="nm">🔄 À renouveler bientôt</div><div class="sb">${finishing} prêt(s) se terminent (~1 versement)</div></div><div class="sp"></div><span class="pill o">${finishing}</span></div>`);
   if(canEdit()&&F.minT<0)alerts.push(`<div class="mv" onclick="go('renouv')" style="cursor:pointer;background:var(--red-l)"><div><div class="nm">⚠️ Trésorerie</div><div class="sb">Deviendrait négative (${money(F.minT)}) le ${fmtDate(F.minD)} si vous renouvelez tout</div></div><div class="sp"></div><span class="pill red">alerte</span></div>`);
   el.innerHTML=`
@@ -375,6 +377,7 @@ function renderDashboard(el){
     <div class="kpi"><div class="l">En retard</div><div class="v" style="color:var(--red)">${retards.length}</div></div>
     <div class="kpi"><div class="l">Caisse</div><div class="v" style="font-size:15px;color:${cashVal!==null&&cashVal<0?'var(--red)':'var(--teal)'}">${cashVal===null?"—":money(cashVal)}</div></div>
   </div>
+  <div class="card" style="background:linear-gradient(135deg,#0e7c86,#0a5a63);color:#fff;border:none"><div style="font-size:13px;opacity:.85">Ma collecte du jour${meMail?" — "+esc(String(meMail).split("@")[0]):""}</div><div style="font-size:28px;font-weight:800;margin-top:2px">${money(myTotal)} FCFA</div><div style="font-size:12px;opacity:.85;margin-top:4px">Prêts ${money(myLoan)} · Épargne ${money(mySav)}</div></div>
   <div class="card"><h2 style="margin-bottom:10px">À faire aujourd'hui — ${fmtDate(t)}</h2>${alerts.length?alerts.join(""):`<div class="empty">Tout est à jour ! 🎉</div>`}</div>
   <div class="card"><h2 style="margin-bottom:8px">Résumé</h2>
     <div class="bal"><span>Encaissé aujourd'hui (collecte)</span><b style="color:var(--green)">${money(colRows.filter(r=>r.s.paidToday).reduce((a,r)=>a+r.s.daily,0))} FCFA</b></div>
@@ -417,6 +420,13 @@ function renderColRows(){
   }).join("");
 }
 async function pay(loanId){const l=LOANS.find(x=>x.id===loanId);if(!l)return;const s=loanStats(l);const t=todayISO();if(s.paidToday){toast("Déjà payé aujourd'hui");return;}if(s.balance<=0){toast("Prêt déjà soldé");return;}const amount=Math.min(s.daily,s.balance);const snap=JSON.stringify(l.data);const d=l.data;d.payments=d.payments||[];d.payments.push({date:t,amount,by:ME.email,kind:"jour"});await pushLoan(l,"Versement du jour enregistré",snap);}
+async function toggleLoanDay(loanId,dISO){
+  if(!canEdit()){toast("Réservé au gérant");return;}
+  const l=LOANS.find(x=>x.id===loanId);if(!l)return;const d=l.data;d.payments=d.payments||[];
+  const idx=d.payments.findIndex(p=>p.date===dISO&&p.kind!=="solde");const snap=JSON.stringify(d);
+  if(idx>=0){d.payments.splice(idx,1);await pushLoan(l,fmtDate(dISO)+" : marqué NON versé",snap);}
+  else{const s=loanStats(l);if(s.balance<=0){toast("Prêt déjà soldé");return;}const amt=Math.min(s.daily,s.balance);d.payments.push({date:dISO,amount:amt,by:ME.email,kind:"jour"});await pushLoan(l,fmtDate(dISO)+" : marqué versé",snap);}
+}
 async function cancelPay(loanId){if(!canEdit()){toast("Réservé au gérant");return;}const l=LOANS.find(x=>x.id===loanId);if(!l)return;const t=todayISO();const d=l.data;const pays=d.payments||[];let idx=-1;for(let i=pays.length-1;i>=0;i--){if(pays[i].date===t&&pays[i].kind!=="retard"&&pays[i].kind!=="solde"){idx=i;break;}}if(idx<0){toast("Aucun versement du jour à annuler");return;}if(!confirm("Annuler le versement du jour de "+clientName(d.clientId)+" ?"))return;const snap=JSON.stringify(d);pays.splice(idx,1);d.payments=pays;await pushLoan(l,"Versement annulé",snap);}
 async function cancelCollect(clientId,plan){if(!canEdit()){toast("Réservé au gérant");return;}const t=todayISO();const row=SAV.find(s=>s.data.clientId===clientId&&(s.data.plan||"express")===plan&&s.data.date===t&&s.data.type!=="retrait");if(!row){toast("Rien à annuler");return;}if(!confirm("Annuler la collecte d'épargne du jour de "+clientName(clientId)+" ?"))return;const {error}=await sb.from("savings").delete().eq("id",row.id);if(error){toast("Annulation impossible");return;}toast("Collecte annulée");loadAll();}
 async function payArrear(loanId,n){const l=LOANS.find(x=>x.id===loanId);if(!l)return;const s=loanStats(l);if(s.arrearsDays<=0){toast("Aucun retard");return;}if(s.balance<=0){toast("Ce prêt est déjà soldé");return;}n=Math.min(n||1,s.arrearsDays);const t=todayISO();const snap=JSON.stringify(l.data);const d=l.data;d.payments=d.payments||[];let remaining=s.balance,done=0;for(let i=0;i<n&&remaining>0;i++){const amt=Math.min(s.daily,remaining);d.payments.push({date:t,amount:amt,by:ME.email,kind:"retard"});remaining-=amt;done++;}const msg=done+" jour(s) de retard réglé(s)"+(done<n?" (plafonné au solde restant)":"");await pushLoan(l,msg,snap);}
@@ -515,6 +525,16 @@ async function collectSaving(clientId,plan){
   if(!ok){toast("⚠️ Non enregistré (réseau). Réessayez.");return;}
   toast("Épargne collectée");loadAll();
 }
+async function toggleSavDay(clientId,plan,dISO){
+  if(!canEdit()){toast("Réservé au gérant");return;}
+  const k=planCfgKey(plan);const c=CLIENTS.find(x=>x.id===clientId);if(!c||!c[k]){toast("Épargnant introuvable");return;}
+  const daily=+c[k].daily||0;if(daily<=0){toast("Montant journalier non défini");return;}
+  const existing=SAV.find(s=>s.data.clientId===clientId&&(s.data.plan||"express")===plan&&s.data.date===dISO&&s.data.type!=="retrait");
+  if(existing){const {error}=await sb.from("savings").delete().eq("id",existing.id);if(error){toast("Suppression impossible");return;}toast(fmtDate(dISO)+" : dépôt retiré");loadAll();return;}
+  const {ok}=await withRetry(()=>sb.from("savings").insert({data:{clientId,type:"depot",plan,amount:daily,date:dISO,kind:"jour",by:ME.email}}));
+  if(!ok){toast("⚠️ Non enregistré (réseau).");return;}
+  toast(fmtDate(dISO)+" : dépôt marqué");loadAll();
+}
 function openAddSaver(plan){
   if(!canEdit()){toast("Réservé au gérant");return;}
   const info=EP[plan];$("svPlan").value=plan;$("saverTitle").textContent="Nouvel épargnant — "+info.label;
@@ -547,7 +567,7 @@ function renderSavCarnet(el){
   const daily=+c[k].daily||0;const since=c[k].since||"";const bal=savingsOf(clientId,plan);const t=todayISO();
   const movs=SAV.filter(s=>s.data.clientId===clientId&&(s.data.plan||"express")===plan).slice().sort((a,b)=>(b.data.date||"").localeCompare(a.data.date||""));
   const collN=movs.filter(s=>s.data.type!=="retrait"&&s.data.kind==="jour").length;
-  let cells="";for(let i=29;i>=0;i--){const dd=addDays(t,-i);const has=SAV.some(s=>s.data.clientId===clientId&&(s.data.plan||"express")===plan&&s.data.date===dd&&s.data.type!=="retrait");cells+=`<div title="${fmtDate(dd)}" style="width:26px;height:26px;border-radius:6px;background:${has?'var(--green-l)':'var(--red-l)'};display:grid;place-items:center;font-size:11px;font-weight:700">${has?'✓':'·'}</div>`;}
+  let cells="";for(let i=29;i>=0;i--){const dd=addDays(t,-i);const has=SAV.some(s=>s.data.clientId===clientId&&(s.data.plan||"express")===plan&&s.data.date===dd&&s.data.type!=="retrait");const hol=isHoliday(dd);const bg=has?'var(--green-l)':(hol?'#f6edda':(dd===t?'#eef2f7':'var(--red-l)'));const mk=has?'✓':(hol?'F':'·');cells+=`<div title="${fmtDate(dd)}${hol?' (férié)':''}" ${canEdit()?`onclick="toggleSavDay('${clientId}','${plan}','${dd}')"`:""} style="width:26px;height:26px;border-radius:6px;background:${bg};display:grid;place-items:center;font-size:11px;font-weight:700${canEdit()?';cursor:pointer':''}">${mk}</div>`;}
   el.innerHTML=`
   <div class="searchbar no-print"><div class="row"><button class="btn alt" onclick="go('${plan}')">← ${info.label}</button>${canEdit()?`<button class="btn" onclick="window.print()">🖨️ Imprimer</button><button class="btn alt" onclick="savePDF('epargne-${(c.name||'').replace(/[^a-zA-Z0-9]+/g,'_')}-${t}')">📄 PDF</button>`:""}${c.phone?`<button class="btn green" onclick="sendSavWhatsApp('${clientId}','${plan}')">📲 WhatsApp</button>`:""}</div></div>
   <div class="card"><img src="${LOGO}" alt="AFRIKAPITAL" style="height:40px;margin-bottom:8px"><div class="phead"><h2>${esc(c.name)}</h2><div class="status">${info.label} · ${fmtDate(t)}</div></div>
@@ -588,9 +608,10 @@ function dayDepots(date){return SAV.filter(s=>s.data.type!=="retrait"&&s.data.da
 function dayRetraits(date){return SAV.filter(s=>s.data.type==="retrait"&&s.data.date===date).reduce((a,s)=>a+(+s.data.amount||0),0);}
 function dayDepenses(date){return EXP.filter(e=>e.data.date===date).reduce((a,e)=>a+(+e.data.amount||0),0);}
 function dayBank(date){return BANK.filter(b=>b.data.date===date).reduce((a,b)=>a+((b.data.type==="depot")?-1:1)*(+b.data.amount||0),0);} // transfert vers banque = sortie de caisse
+function dayInject(date){return CASH.filter(c=>c.data.kind==="inject"&&c.data.date===date).reduce((a,c)=>a+(+c.data.amount||0),0);}
 function dayDisbursed(date){return LOANS.filter(l=>(l.data.disbursedDate||l.data.startDate)===date).reduce((a,l)=>a+(+l.data.capital||0),0);}
-function netDay(date){return dayCollecte(date)+dayDepots(date)-dayRetraits(date)-dayDepenses(date)+dayBank(date)-dayDisbursed(date);}
-function cashBase(){return CASH.filter(c=>c.data.kind!=="bank"&&c.data.kind!=="ferie").slice().sort((a,b)=>(a.data.date||"").localeCompare(b.data.date||""))[0]||null;}
+function netDay(date){return dayCollecte(date)+dayDepots(date)+dayInject(date)-dayRetraits(date)-dayDepenses(date)+dayBank(date)-dayDisbursed(date);}
+function cashBase(){return CASH.filter(c=>c.data.kind!=="bank"&&c.data.kind!=="ferie"&&c.data.kind!=="inject"&&c.data.kind!=="cloture").slice().sort((a,b)=>(a.data.date||"").localeCompare(b.data.date||""))[0]||null;}
 let _ferDate=null;
 function renderFeries(el){
   const t=todayISO();const d=_ferDate||t;
@@ -633,10 +654,13 @@ function renderCaisse(el){
     return;
   }
   const open=openingFor(t),close=closeFor(t);
+  const closedRow=CASH.find(c=>c.data.kind==="cloture"&&c.data.date===t);
   el.innerHTML=`
   <div class="card"><div class="status" style="margin-bottom:8px">📅 ${fmtDate(t)} — L'ouverture est <b>reportée automatiquement</b> de la fermeture de la veille.</div>
-    <div class="calc"><div><span>Solde d'ouverture (report veille)</span><b>${money(open)}</b></div><div><span>+ Collecte du jour</span><b style="color:var(--green)">${money(dayCollecte(t))}</b></div><div><span>+ Dépôts épargne</span><b style="color:var(--green)">${money(dayDepots(t))}</b></div><div><span>− Retraits épargne</span><b style="color:var(--red)">${money(dayRetraits(t))}</b></div><div><span>− Dépenses</span><b style="color:var(--red)">${money(dayDepenses(t))}</b></div>${dayDisbursed(t)>0?`<div><span>− Nouveaux prêts accordés</span><b style="color:var(--red)">${money(dayDisbursed(t))}</b></div>`:""}${dayBank(t)!==0?`<div><span>Mvt banque</span><b>${money(dayBank(t))}</b></div>`:""}<div style="border-top:2px solid var(--ink);margin-top:4px;padding-top:8px"><span><b>Fermeture (calculée)</b></span><b style="color:var(--teal)">${money(close)}</b></div></div>
-    ${canEdit()?`<div class="status" style="margin-top:10px">Solde initial défini le ${fmtDate(base.data.date)} : ${money(base.data.opening||0)}. <a href="#" onclick="editInitialCash();return false" style="color:var(--teal)">Corriger</a></div>`:""}
+    <div class="calc"><div><span>Solde d'ouverture (report veille)</span><b>${money(open)}</b></div><div><span>+ Collecte du jour</span><b style="color:var(--green)">${money(dayCollecte(t))}</b></div><div><span>+ Dépôts épargne</span><b style="color:var(--green)">${money(dayDepots(t))}</b></div>${dayInject(t)>0?`<div><span>+ Injection de liquidité</span><b style="color:var(--green)">${money(dayInject(t))}</b></div>`:""}<div><span>− Retraits épargne</span><b style="color:var(--red)">${money(dayRetraits(t))}</b></div><div><span>− Dépenses</span><b style="color:var(--red)">${money(dayDepenses(t))}</b></div>${dayDisbursed(t)>0?`<div><span>− Nouveaux prêts accordés</span><b style="color:var(--red)">${money(dayDisbursed(t))}</b></div>`:""}${dayBank(t)!==0?`<div><span>Mvt banque</span><b>${money(dayBank(t))}</b></div>`:""}<div style="border-top:2px solid var(--ink);margin-top:4px;padding-top:8px"><span><b>${closedRow?"Clôture du jour":"Fermeture (calculée)"}</b></span><b style="color:var(--teal)">${money(close)}</b></div></div>
+    ${closedRow?`<div class="status" style="background:var(--green-l);color:#0f7a3d;margin-top:10px">✅ Journée clôturée${closedRow.data.by&&closedRow.data.by!=="import"?" par "+esc(String(closedRow.data.by).split("@")[0]):""}. La caisse est fermée pour aujourd'hui.</div>`:""}
+    ${canEdit()?`<div class="row no-print" style="margin-top:10px">${!closedRow?`<button class="btn gold" onclick="injectCash()">💵 Injection de liquidité</button><button class="btn" onclick="closeDay()">🔒 Clôturer la journée</button>`:`<button class="btn alt" onclick="reopenDay()">🔓 Rouvrir la journée</button>`}</div>
+    <div class="status" style="margin-top:10px">Solde initial défini le ${fmtDate(base.data.date)} : ${money(base.data.opening||0)}. <a href="#" onclick="editInitialCash();return false" style="color:var(--teal)">Corriger</a></div>`:""}
   </div>
   <div class="card"><h2 style="margin-bottom:8px">Historique des caisses</h2><div id="cbList"></div></div>`;
   // historique : dates ayant un mouvement, depuis la base
@@ -649,6 +673,9 @@ function renderCaisse(el){
   $("cbList").innerHTML=list.length?list.slice(0,90).map(d=>`<div class="mv"><div><div class="nm">${fmtDate(d)}</div><div class="sb">ouverture ${money(openingFor(d))}</div></div><div class="sp"></div><b style="color:var(--teal)">${money(closeFor(d))}</b></div>`).join(""):`<div class="empty">Aucune caisse.</div>`;
 }
 async function setInitialCash(){const o=+$("cbOpen").value||0;const {ok}=await withRetry(()=>sb.from("cashbook").insert({data:{date:todayISO(),opening:o,initial:true},updated_by:ME.id}));if(!ok){toast("⚠️ Non enregistré (réseau).");return;}toast("Solde initial défini");loadAll();}
+async function injectCash(){if(!canEdit())return;const v=prompt("Montant de l'injection de liquidité (renforcement du capital) en FCFA :","");if(v===null)return;const amt=+v||0;if(amt<=0){toast("Montant invalide");return;}const label=prompt("Libellé (optionnel) :","Renforcement capital")||"";const {ok}=await withRetry(()=>sb.from("cashbook").insert({data:{kind:"inject",date:todayISO(),amount:amt,label,by:ME.email},updated_by:ME.id}));if(!ok){toast("⚠️ Non enregistré (réseau).");return;}toast("Injection de "+money(amt)+" enregistrée");loadAll();}
+async function closeDay(){if(!canEdit())return;const t=todayISO();const close=closeFor(t);if(!confirm("Clôturer la journée du "+fmtDate(t)+" ?\nFermeture de caisse : "+money(close)+" FCFA.\nToutes les opérations du jour doivent être saisies."))return;const {ok}=await withRetry(()=>sb.from("cashbook").insert({data:{kind:"cloture",date:t,closing:close,by:ME.email},updated_by:ME.id}));if(!ok){toast("⚠️ Non enregistré (réseau).");return;}toast("Journée clôturée");loadAll();}
+async function reopenDay(){if(!canEdit())return;const t=todayISO();const row=CASH.find(c=>c.data.kind==="cloture"&&c.data.date===t);if(!row)return;if(!confirm("Rouvrir la journée du "+fmtDate(t)+" ?"))return;const {error}=await sb.from("cashbook").delete().eq("id",row.id);if(error){toast("Impossible");return;}toast("Journée rouverte");loadAll();}
 async function editInitialCash(){const base=cashBase();if(!base)return;const v=prompt("Corriger le solde de caisse initial (défini le "+fmtDate(base.data.date)+") :",base.data.opening||0);if(v===null)return;const o=+v||0;const {ok}=await withRetry(()=>sb.from("cashbook").update({data:{...base.data,opening:o},updated_at:new Date().toISOString(),updated_by:ME.id}).eq("id",base.id));if(!ok){toast("⚠️ Non enregistré (réseau).");return;}toast("Solde initial corrigé");loadAll();}
 
 /* ---------- RELANCES WHATSAPP ---------- */
@@ -733,11 +760,15 @@ function renderCarnet(el){
     const lastDay=(t<s.end)?t:s.end;
     let cells="";let dd=s.start;let guard=0;
     while(dd<=lastDay && guard<400){
-      const p=pays.filter(x=>x.date===dd);
-      const paidThatDay=p.length>0;const isRet=p.some(x=>x.kind==="retard");
-      const col=paidThatDay?(isRet?"#f6edda":"var(--green-l)"):"var(--red-l)";
-      const mk=paidThatDay?(isRet?"R":"✓"):"·";
-      cells+=`<div title="${fmtDate(dd)}" style="width:30px;height:30px;border-radius:6px;background:${col};display:grid;place-items:center;font-size:12px;font-weight:700">${mk}</div>`;
+      const dISO=dd;
+      const p=pays.filter(x=>x.date===dISO&&x.kind!=="solde");
+      const paidThatDay=p.length>0;const hol=isHoliday(dISO);
+      let col,mk;
+      if(paidThatDay){col="var(--green-l)";mk="✓";}
+      else if(hol){col="#f6edda";mk="F";}
+      else if(dISO===t){col="#eef2f7";mk="·";}
+      else {col="var(--red-l)";mk="·";}
+      cells+=`<div title="${fmtDate(dISO)}${hol?' (férié)':''}" ${canEdit()?`onclick="toggleLoanDay('${l.id}','${dISO}')"`:""} style="width:30px;height:30px;border-radius:6px;background:${col};display:grid;place-items:center;font-size:12px;font-weight:700${canEdit()?';cursor:pointer':''}">${mk}</div>`;
       dd=addDays(dd,1);guard++;
     }
     return `<div class="card"><div class="phead"><h2 style="font-size:15px">Prêt du ${fmtDate(s.start)}</h2><span class="pill ${s.status==="retard"?"red":(s.status==="solde"?"gray":"green")}">${s.status}</span></div>
@@ -747,7 +778,7 @@ function renderCarnet(el){
       <div class="bal"><span>Versements payés</span><b>${s.installmentsPaid}/${s.dur}</b></div>
       <div class="bal"><span>Payé / Reste</span><b>${money(s.paid)} / ${money(s.balance)}</b></div>
       <div class="bal"><span>Retard</span><b style="color:${s.arrearsDays>0?'var(--red)':'var(--green)'}">${s.arrearsDays>0?s.arrearsDays+" j ("+money(s.arrears)+")":"aucun"}</b></div>
-      <div style="margin-top:10px"><div class="sb" style="margin-bottom:6px">Calendrier (✓ payé · R rattrapage · · manqué)</div><div style="display:flex;flex-wrap:wrap;gap:5px">${cells||'<span class="sb">—</span>'}</div></div>
+      <div style="margin-top:10px"><div class="sb" style="margin-bottom:6px">Calendrier (✓ payé · · non versé · F férié)${canEdit()?" — touchez un jour pour marquer payé / non payé":""}</div><div style="display:flex;flex-wrap:wrap;gap:5px">${cells||'<span class="sb">—</span>'}</div></div>
       ${canEdit()?`<div class="act no-print" style="margin-top:10px"><button class="btn alt" onclick="openEditLoan('${l.id}')">✏️ Modifier</button>${s.status!=="solde"?`<button class="btn gold" onclick="soldeLoan('${l.id}')">💰 Solder ce prêt (reste ${money(s.balance)})</button>`:""}</div>`:""}
     </div>`;
   }).join(""):`<div class="empty">Aucun prêt pour ce client.</div>`}`;
@@ -760,8 +791,8 @@ function renderBank(el){
   el.innerHTML=`
   <div class="kpis" style="grid-template-columns:1fr"><div class="kpi"><div class="l">Solde en banque</div><div class="v" style="color:var(--teal)">${money(bal)} FCFA</div></div></div>
   <div class="status" style="margin-bottom:10px">Un <b>dépôt en banque</b> sort l'argent de la caisse. Un <b>retrait de banque</b> le remet dans la caisse.</div>
-  ${canEdit()?`<div class="row" style="margin-bottom:12px"><button class="btn green" style="flex:1" onclick="addBank('depot')">↑ Dépôt en banque</button><button class="btn gold" style="flex:1" onclick="addBank('retrait')">↓ Retrait de banque</button></div>`:""}
-  <div class="card"><h2 style="margin-bottom:8px">Mouvements bancaires</h2><div id="bkList"></div></div>`;
+  ${canEdit()?`<div class="row no-print" style="margin-bottom:12px"><button class="btn green" onclick="addBank('depot')">↑ Dépôt en banque</button><button class="btn gold" onclick="addBank('retrait')">↓ Retrait de banque</button><button class="btn" onclick="window.print()">🖨️ Imprimer</button><button class="btn alt" onclick="savePDF('banque-${todayISO()}')">📄 PDF</button></div>`:""}
+  <div class="card"><img src="${LOGO}" alt="AFRIKAPITAL" style="height:40px;margin-bottom:8px"><div class="phead"><h2>Mouvements bancaires</h2><div class="status">AFRIKAPITAL · solde ${money(bal)} · ${fmtDate(todayISO())}</div></div><div id="bkList"></div></div>`;
   $("bkList").innerHTML=rows.length?rows.map(b=>{const dep=b.data.type==="depot";return `<div class="mv"><div><div class="nm">${dep?"Dépôt en banque":"Retrait de banque"}</div><div class="sb">${fmtDate(b.data.date)}${b.data.by&&b.data.by!=="import"?" · "+esc(String(b.data.by).split("@")[0]):""}</div></div><div class="sp"></div><b style="color:${dep?'var(--green)':'var(--red)'}">${dep?"+":"-"}${money(b.data.amount)}</b>${canEdit()?`<button class="btn ghost sm" onclick="delBank('${b.id}')">✕</button>`:""}</div>`;}).join(""):`<div class="empty">Aucun mouvement bancaire.</div>`;
 }
 async function addBank(type){
