@@ -2,8 +2,16 @@
 <html lang="fr">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>AFRIKAPITAL — Gestion de crédit</title>
+<meta name="theme-color" content="#0e7c86">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="AFRIKAPITAL">
+<link rel="apple-touch-icon" href="icon.png">
+<link rel="icon" type="image/png" href="icon.png">
+<link rel="manifest" href="manifest.json">
 <style>
 :root{--teal:#0f6466;--teal-d:#0b4c4e;--teal-l:#e2f0ef;--gold:#b5822b;--gold-l:#f6edda;--green:#1f9d55;--green-l:#e3f5ea;--red:#d64545;--red-l:#fbe6e6;--ink:#17212e;--muted:#64748b;--line:#e2e8f0;--bg:#eef1f4;--surface-2:#f7f9fb}
 *{box-sizing:border-box}
@@ -208,6 +216,31 @@ function $(id){return document.getElementById(id);}
 function show(id,t,x){const e=$(id);if(e){e.className="msg show "+t;e.textContent=x;}}
 function hide(id){const e=$(id);if(e)e.className="msg";}
 function toast(m){const t=$("toast");t.textContent=m;t.classList.add("show");clearTimeout(t._h);t._h=setTimeout(()=>t.classList.remove("show"),2000);}
+let _seenOps=null;
+function activityList(){
+  const t=todayISO();const ops=[];
+  LOANS.forEach(l=>((l.data.payments)||[]).forEach(p=>{if(p.date===t)ops.push({k:"L|"+l.id+"|"+p.date+"|"+p.amount+"|"+(p.by||"")+"|"+(p.kind||""),by:p.by,txt:money(p.amount)+" — prêt "+clientName(l.data.clientId)});}));
+  SAV.forEach(s=>{if(s.data.date===t&&s.data.type!=="retrait")ops.push({k:"S|"+s.id,by:s.data.by,txt:money(s.data.amount)+" — épargne "+clientName(s.data.clientId)});});
+  EXP.forEach(e=>{if(e.data.date===t)ops.push({k:"E|"+e.id,by:e.data.by,txt:money(e.data.amount)+" — dépense"});});
+  return ops;
+}
+function notify(msg){
+  toast("🔔 "+msg);
+  try{ if(typeof Notification!=="undefined"&&Notification.permission==="granted"){ new Notification("AFRIKAPITAL",{body:msg,icon:"icon.png",tag:"afk-"+Date.now()}); } }catch(e){}
+}
+function checkNewActivity(){
+  if(!ME||!canEdit())return; // seul le gérant est notifié des opérations des collectrices
+  const ops=activityList();
+  if(_seenOps===null){_seenOps=new Set(ops.map(o=>o.k));return;} // 1er chargement : pas de notif
+  const me=ME.email;
+  const fresh=ops.filter(o=>!_seenOps.has(o.k)&&o.by&&o.by!==me&&o.by!=="import");
+  fresh.forEach(o=>notify(String(o.by).split("@")[0]+" : "+o.txt));
+  ops.forEach(o=>_seenOps.add(o.k));
+}
+function enableNotifs(){
+  if(typeof Notification==="undefined"){toast("Notifications non supportées ici");return;}
+  Notification.requestPermission().then(p=>{ if(p==="granted"){toast("Notifications activées");new Notification("AFRIKAPITAL",{body:"Notifications activées ✓",icon:"icon.png"});} else {toast("Notifications refusées");} if(VIEW==="dashboard")render(); });
+}
 function esc(s){return String(s==null?"":s).replace(/[<>&]/g,c=>({"<":"&lt;",">":"&gt;","&":"&amp;"}[c]));}
 function canEdit(){return ROLE==="gerant";}
 function money(n){return (Math.round(Number(n)||0)).toLocaleString("fr-FR").replace(/\u202f/g," ");}
@@ -338,6 +371,7 @@ async function loadAll(){
   BANK=CASH.filter(r=>r.data.kind==="bank");
   HOLIDAYS=CASH.filter(r=>r.data.kind==="ferie").map(r=>r.data.date).filter(Boolean);
   if(VIEW&&VIEWS[VIEW])VIEWS[VIEW].render($("content"));
+  try{checkNewActivity();}catch(e){}
 }
 
 /* ---------- DASHBOARD ---------- */
@@ -378,6 +412,7 @@ function renderDashboard(el){
     <div class="kpi"><div class="l">Caisse</div><div class="v" style="font-size:15px;color:${cashVal!==null&&cashVal<0?'var(--red)':'var(--teal)'}">${cashVal===null?"—":money(cashVal)}</div></div>
   </div>
   <div class="card" style="background:linear-gradient(135deg,#0e7c86,#0a5a63);color:#fff;border:none"><div style="font-size:13px;opacity:.85">Ma collecte du jour${meMail?" — "+esc(String(meMail).split("@")[0]):""}</div><div style="font-size:28px;font-weight:800;margin-top:2px">${money(myTotal)} FCFA</div><div style="font-size:12px;opacity:.85;margin-top:4px">Prêts ${money(myLoan)} · Épargne ${money(mySav)}</div></div>
+  ${canEdit()&&(typeof Notification!=="undefined")&&Notification.permission!=="granted"?`<div class="card no-print" style="display:flex;align-items:center;gap:10px"><div style="flex:1"><div class="nm">🔔 Notifications</div><div class="sb">Être prévenu à chaque collecte, versement ou dépense d'une collectrice (quand l'appli est ouverte).</div></div><button class="btn" onclick="enableNotifs()">Activer</button></div>`:""}
   <div class="card"><h2 style="margin-bottom:10px">À faire aujourd'hui — ${fmtDate(t)}</h2>${alerts.length?alerts.join(""):`<div class="empty">Tout est à jour ! 🎉</div>`}</div>
   <div class="card"><h2 style="margin-bottom:8px">Résumé</h2>
     <div class="bal"><span>Encaissé aujourd'hui (collecte)</span><b style="color:var(--green)">${money(colRows.filter(r=>r.s.paidToday).reduce((a,r)=>a+r.s.daily,0))} FCFA</b></div>
