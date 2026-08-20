@@ -252,6 +252,9 @@ function fmtDate(iso){if(!iso)return "—";return parseISO(iso).toLocaleDateStri
 function clientName(id){const c=CLIENTS.find(x=>x.id===id);return c?c.name:"—";}
 function initials(n){return (n||"?").trim().split(/\s+/).slice(0,2).map(w=>w[0]||"").join("").toUpperCase();}
 function savingsOf(clientId,plan){return SAV.filter(s=>s.data.clientId===clientId&&(!plan||(s.data.plan||"express")===plan)).reduce((b,s)=>b+((s.data.type==="retrait")?-1:1)*(+s.data.amount||0),0);}
+function savedDaysOf(clientId,plan){const c=CLIENTS.find(x=>x.id===clientId);if(!c)return 0;const k=planCfgKey(plan);const daily=+((c[k]||{}).daily)||0;if(daily<=0)return 0;return Math.round(savingsOf(clientId,plan)/daily);}
+function savExpectedDays(clientId,plan){const c=CLIENTS.find(x=>x.id===clientId);if(!c)return 0;const k=planCfgKey(plan);const since=(c[k]||{}).since;if(!since)return 0;const t=bizDay();if(t<=since)return 0;return Math.max(0,diffDays(since,t)-holidaysInRange(since,addDays(t,-1)));}
+function savArrears(clientId,plan){return Math.max(0,savExpectedDays(clientId,plan)-savedDaysOf(clientId,plan));}
 function loanStats(l){
   const d=l.data||{};const daily=+d.daily||0,cap=+d.capital||0,dur=+d.duration||DUR,start=d.startDate;const t=bizDay();
   const total=+d.total||Math.round(cap*(1+RATE/100)); // total dû = capital + 10%
@@ -282,6 +285,7 @@ const NAV=[
   {v:"dashboard",ic:"🏠",label:"Tableau de bord",roles:["gerant","collectrice"]},
   {sep:"Activité"},
   {v:"collecte",ic:"📅",label:"Collecte du jour",roles:["gerant","collectrice"]},
+  {v:"retards",ic:"⏰",label:"Journal des retards",roles:["gerant","collectrice"]},
   {v:"relances",ic:"🔔",label:"Relances WhatsApp",roles:["gerant","collectrice"]},
   {v:"clients",ic:"👥",label:"Clients",roles:["gerant","collectrice"]},
   {v:"loans",ic:"💳",label:"Prêts / Crédits",roles:["gerant"]},
@@ -296,6 +300,7 @@ const NAV=[
   {v:"caisse",ic:"🧮",label:"Caisse",roles:["gerant","collectrice"]},
   {v:"feries",ic:"📅",label:"Jours fériés",roles:["gerant"]},
   {sep:"Analyse"},
+  {v:"kpi",ic:"📈",label:"KPI / Indicateurs",roles:["gerant"]},
   {v:"compta",ic:"📊",label:"Comptabilité / Trésorerie",roles:["gerant"]},
   {v:"banque",ic:"🏦",label:"Banque",roles:["gerant"]},
   {v:"historique",ic:"📈",label:"Historique & CA",roles:["gerant"]},
@@ -309,6 +314,7 @@ const NAV=[
 const VIEWS={
   dashboard:{title:"Tableau de bord",sub:"Vue d'ensemble",render:renderDashboard},
   collecte:{title:"Collecte du jour",sub:"Un versement par jour",render:renderCollecte},
+  retards:{title:"Journal des retards",sub:"Payer un ou plusieurs jours de retard",render:renderRetards},
   relances:{title:"Relances WhatsApp",sub:"Rappels aux clients en retard",render:renderRelances},
   carnet:{title:"Carnet du client",sub:"Détail des versements",render:renderCarnet},
   clients:{title:"Clients",sub:"Répertoire des clients",render:renderClients},
@@ -328,6 +334,7 @@ const VIEWS={
   interets:{title:"Bilan des intérêts",sub:"Gains par mois",render:renderInterets},
   sauvegarde:{title:"Sauvegarde / Export",sub:"Protéger vos données",render:renderSauvegarde},
   compta:{title:"Comptabilité / Trésorerie",sub:"Situation financière",render:renderCompta},
+  kpi:{title:"KPI / Indicateurs",sub:"Performance du portefeuille",render:renderKPI},
   banque:{title:"Banque",sub:"Transferts caisse ↔ banque",render:renderBank},
   renouv:{title:"Renouvellements",sub:"Selon le remboursement",render:renderRenouv},
 };
@@ -385,6 +392,9 @@ function renderDashboard(el){
   const colDone=colRows.filter(r=>r.s.paidToday).length;
   const colRemain=colRows.filter(r=>!r.s.paidToday);
   const colRemainAmt=colRemain.reduce((a,r)=>a+Math.min(r.s.daily,r.s.balance),0);
+  let attenduPrets=0,collectePrets=0;
+  colRows.forEach(r=>{const todayPay=((r.l.data.payments)||[]).filter(p=>p.date===t&&p.kind==="jour").reduce((x,p)=>x+(+p.amount||0),0);const avant=r.s.balance+todayPay;attenduPrets+=Math.min(r.s.daily,avant);collectePrets+=todayPay;});
+  const restePrets=Math.max(0,attenduPrets-collectePrets);
   const svE=savers("express"),svK=savers("koor");const svTot=svE.length+svK.length;
   const svDone=svE.filter(c=>collectedToday(c.id,"express")).length+svK.filter(c=>collectedToday(c.id,"koor")).length;
   const finishing=active.filter(s=>s.balance>0&&Math.ceil(s.balance/(s.daily||1))<=1).length;
@@ -412,6 +422,7 @@ function renderDashboard(el){
     <div class="kpi"><div class="l">Caisse</div><div class="v" style="font-size:15px;color:${cashVal!==null&&cashVal<0?'var(--red)':'var(--teal)'}">${cashVal===null?"—":money(cashVal)}</div></div>
   </div>
   <div class="card" style="background:linear-gradient(135deg,#0e7c86,#0a5a63);color:#fff;border:none"><div style="font-size:13px;opacity:.85">Ma collecte du jour${meMail?" — "+esc(String(meMail).split("@")[0]):""}</div><div style="font-size:28px;font-weight:800;margin-top:2px">${money(myTotal)} FCFA</div><div style="font-size:12px;opacity:.85;margin-top:4px">Prêts ${money(myLoan)} · Épargne ${money(mySav)}</div></div>
+  <div class="card"><div class="phead" style="border:none"><h2 style="font-size:15px">💵 Versement attendu aujourd'hui — prêts</h2><b style="font-size:20px;color:var(--teal)">${money(attenduPrets)}</b></div><div class="row" style="margin-top:6px;gap:16px"><span class="sb">✅ Déjà collecté : <b style="color:var(--green)">${money(collectePrets)}</b></span><span class="sb">⏳ Reste à encaisser : <b style="color:${restePrets>0?'var(--gold)':'var(--green)'}">${money(restePrets)}</b></span></div><div class="sb" style="margin-top:4px">${colDone}/${colRows.length} clients collectés</div></div>
   ${canEdit()&&(typeof Notification!=="undefined")&&Notification.permission!=="granted"?`<div class="card no-print" style="display:flex;align-items:center;gap:10px"><div style="flex:1"><div class="nm">🔔 Notifications</div><div class="sb">Être prévenu à chaque collecte, versement ou dépense d'une collectrice (quand l'appli est ouverte).</div></div><button class="btn" onclick="enableNotifs()">Activer</button></div>`:""}
   <div class="card"><h2 style="margin-bottom:10px">À faire aujourd'hui — ${fmtDate(t)}</h2>${alerts.length?alerts.join(""):`<div class="empty">Tout est à jour ! 🎉</div>`}</div>
   <div class="card"><h2 style="margin-bottom:8px">Résumé</h2>
@@ -455,6 +466,43 @@ function renderColRows(){
   }).join("");
 }
 async function pay(loanId){const l=LOANS.find(x=>x.id===loanId);if(!l)return;const s=loanStats(l);const t=bizDay();if(s.paidToday){toast("Déjà payé aujourd'hui");return;}if(s.balance<=0){toast("Prêt déjà soldé");return;}const amount=Math.min(s.daily,s.balance);const snap=JSON.stringify(l.data);const d=l.data;d.payments=d.payments||[];d.payments.push({date:t,amount,by:ME.email,kind:"jour"});await pushLoan(l,"Versement du jour enregistré",snap);}
+async function payLoanArrear(loanId){
+  const l=LOANS.find(x=>x.id===loanId);if(!l)return;
+  const s=loanStats(l);
+  if(s.balance<=0){toast("Prêt déjà soldé");return;}
+  if(s.arrearsDays<=0){toast("Aucun retard");return;}
+  const v=prompt("Combien de jours de retard payer ? (retard actuel : "+s.arrearsDays+")",String(s.arrearsDays));
+  if(v===null)return;let n=parseInt(v,10);if(!(n>0)){toast("Nombre invalide");return;}
+  n=Math.min(n,s.arrearsDays);
+  const t=bizDay();const d=l.data;d.payments=d.payments||[];
+  const paidDates=new Set(d.payments.filter(p=>p.kind!=="solde").map(p=>p.date));
+  const unpaid=[];let day=s.start,g=0;
+  while(day<t&&g<3000){if(!isHoliday(day)&&!paidDates.has(day))unpaid.push(day);day=addDays(day,1);g++;}
+  const toPay=unpaid.slice(0,n);
+  let remaining=s.balance,done=0;const snap=JSON.stringify(d);
+  for(const dd of toPay){if(remaining<=0)break;const amt=Math.min(s.daily,remaining);d.payments.push({date:dd,amount:amt,by:ME.email,kind:"jour"});remaining-=amt;done++;}
+  if(done===0){toast("Aucun retard à payer");return;}
+  await pushLoan(l,done+" jour(s) de retard payé(s)"+(done<n?" (plafonné au solde)":""),snap);
+}
+async function paySavArrear(clientId,plan){
+  const c=CLIENTS.find(x=>x.id===clientId);if(!c)return;const k=planCfgKey(plan);const daily=+((c[k]||{}).daily)||0;if(daily<=0){toast("Montant journalier non défini");return;}
+  const ar=savArrears(clientId,plan);
+  if(ar<=0){toast("Aucun retard");return;}
+  const v=prompt("Combien de jours de retard d'épargne payer ? (retard actuel : "+ar+")",String(ar));
+  if(v===null)return;let n=parseInt(v,10);if(!(n>0)){toast("Nombre invalide");return;}
+  n=Math.min(n,ar);
+  const {ok}=await withRetry(()=>sb.from("savings").insert({data:{clientId,type:"depot",plan,amount:n*daily,date:bizDay(),kind:"retard",note:n+" jour(s) de retard",by:ME.email}}));
+  if(!ok){toast("⚠️ Non enregistré (réseau).");return;}
+  toast(n+" jour(s) de retard épargne payé(s)");loadAll();
+}
+async function collectSavToday(clientId,plan){
+  const c=CLIENTS.find(x=>x.id===clientId);if(!c)return;const k=planCfgKey(plan);const daily=+((c[k]||{}).daily)||0;if(daily<=0){toast("Montant journalier non défini");return;}
+  const t=bizDay();
+  if(SAV.some(s=>s.data.clientId===clientId&&(s.data.plan||"express")===plan&&s.data.date===t&&s.data.type!=="retrait"&&s.data.kind!=="retard")){toast("Déjà collecté aujourd'hui");return;}
+  const {ok}=await withRetry(()=>sb.from("savings").insert({data:{clientId,type:"depot",plan,amount:daily,date:t,kind:"jour",by:ME.email}}));
+  if(!ok){toast("⚠️ Non enregistré (réseau).");return;}
+  toast("Épargne du jour collectée");loadAll();
+}
 async function toggleLoanDay(loanId,dISO){
   if(!canEdit()){toast("Réservé au gérant");return;}
   const l=LOANS.find(x=>x.id===loanId);if(!l)return;const d=l.data;d.payments=d.payments||[];
@@ -514,12 +562,29 @@ function openEditLoan(loanId){if(!canEdit()){toast("Réservé au gérant");retur
 function calcLoan(){const cap=+$("lCap").value||0,dur=+$("lDur").value||DUR,daily=+$("lDaily").value||0,start=$("lStart").value||bizDay();const total=Math.round(cap*(1+RATE/100));const soldeFinal=Math.max(0,total-daily*dur);$("cTotal").textContent=total?money(total)+" FCFA":"—";$("cInt").textContent=cap?money(total-cap)+" FCFA":"—";$("cEnd").textContent=dur?fmtDate(addDays(start,dur)):"—";const sf=$("cSolde");if(sf)sf.textContent=(daily&&dur)?money(soldeFinal)+" FCFA":"—";}
 async function saveLoan(){if(!canEdit())return;const id=$("lLoanId").value;const clientId=$("lClient").value,cap=+$("lCap").value||0,dur=+$("lDur").value||DUR,daily=+$("lDaily").value||0,start=$("lStart").value||bizDay();if(!clientId||cap<=0||daily<=0){show("lMsg","err","Client, capital et journalier requis.");return;}const total=Math.round(cap*(1+RATE/100));show("lMsg","info","Enregistrement…");
   if(id){const l=LOANS.find(x=>x.id===id);if(!l){show("lMsg","err","Prêt introuvable.");return;}const paidCount=(l.data.payments||[]).filter(p=>p.kind!=="solde").length;if(paidCount>dur){show("lMsg","err","Durée trop courte : "+paidCount+" versements déjà faits.");return;}const data=Object.assign({},l.data,{capital:cap,duration:dur,daily,total,startDate:start});if(data.status==="solde"){const np=(data.payments||[]).reduce((a,p)=>a+(+p.amount||0),0);if(np<total)data.status="actif";}const {ok}=await withRetry(()=>sb.from("loans").update({data,updated_at:new Date().toISOString(),updated_by:ME.id}).eq("id",id));if(!ok){show("lMsg","err","Non enregistré (réseau). Réessayez.");return;}close_("ovLoan");toast("Prêt modifié");loadAll();return;}
-  const data={clientId,capital:cap,duration:dur,daily,total,startDate:start,disbursedDate:bizDay(),status:"actif",payments:[]};const {ok}=await withRetry(()=>sb.from("loans").insert({data,updated_by:ME.id}));if(!ok){show("lMsg","err","Non enregistré (réseau). Réessayez.");return;}close_("ovLoan");toast("Crédit accordé");go("collecte");loadAll();}
+  const data={clientId,capital:cap,duration:dur,daily,total,startDate:start,disbursedDate:bizDay(),status:"actif",payments:[]};const {ok}=await withRetry(()=>sb.from("loans").insert({data,updated_by:ME.id}));if(!ok){show("lMsg","err","Non enregistré (réseau). Réessayez.");return;}close_("ovLoan");toast("Crédit accordé");try{notifyLoanGranted(clientId,cap,dur,daily,total,start);}catch(e){}go("collecte");loadAll();}
+function notifyLoanGranted(clientId,cap,dur,daily,total,start){
+  const c=CLIENTS.find(x=>x.id===clientId);if(!c)return;
+  const end=addDays(start,dur-1);
+  const phone=waPhone(c.phone);
+  const msg="Bonjour "+(c.name||"")+",\n"+
+    "AFRIKAPITAL vous confirme votre prêt :\n"+
+    "• Montant : "+money(cap)+" FCFA\n"+
+    "• À rembourser : "+money(total)+" FCFA\n"+
+    "• Versement journalier : "+money(daily)+" FCFA\n"+
+    "• Début : "+fmtDate(start)+"\n"+
+    "• Fin (dernier versement) : "+fmtDate(end)+"\n"+
+    "• Durée : "+dur+" jours\n\n"+
+    "Important : tout jour non versé (retard) doit être payé le lendemain.\n"+
+    "Merci de votre confiance.";
+  if(!phone)return; // pas de numéro : le prêt est déjà accordé, on ignore simplement WhatsApp
+  window.open("https://wa.me/"+phone+"?text="+encodeURIComponent(msg),"_blank");
+}
 
 /* ---------- EPARGNE JOURNALIERE ---------- */
 function planCfgKey(plan){return plan==="express"?"epExpress":"epKoor";}
 function savers(plan){const k=planCfgKey(plan);return CLIENTS.filter(c=>c[k]&&(+c[k].daily>0));}
-function collectedToday(clientId,plan){const t=bizDay();return SAV.some(s=>s.data.clientId===clientId&&(s.data.plan||"express")===plan&&s.data.date===t&&s.data.type!=="retrait");}
+function collectedToday(clientId,plan){const t=bizDay();return SAV.some(s=>s.data.clientId===clientId&&(s.data.plan||"express")===plan&&s.data.date===t&&s.data.type!=="retrait"&&s.data.kind!=="retard");}
 function renderEp(plan){
   const el=$("content");const info=EP[plan];const k=planCfgKey(plan);
   const list=SAV.filter(s=>(s.data.plan||"express")===plan);let inS=0,outS=0;list.forEach(s=>{if(s.data.type==="retrait")outS+=+s.data.amount||0;else inS+=+s.data.amount||0;});
@@ -543,7 +608,7 @@ function renderEp(plan){
     let act=done?`<span class="pill green" style="align-self:center;flex:1;text-align:center">✓ Collecté</span>${canEdit()?`<button class="btn red sm" onclick="cancelCollect('${c.id}','${plan}')">Annuler</button>`:""}`:`<button class="btn green" onclick="collectSaving('${c.id}','${plan}')">✓ Collecté (${money(daily)})</button>`;
     act+=`<button class="btn ghost sm" onclick="openSavCarnet('${c.id}','${plan}')" title="Carnet">📖</button>`;
     if(canEdit()&&!done)act+=`<button class="btn ghost sm" onclick="editSaverDaily('${c.id}','${plan}')" title="Modifier le montant">✏️</button>`;
-    return `<div class="item"><div class="nm">${esc(c.name)}</div><div class="sb">${money(daily)} FCFA/jour · solde ${money(savingsOf(c.id,plan))}</div><div class="act">${act}</div></div>`;
+    return `<div class="item"><div class="nm">${esc(c.name)}</div><div class="sb">${money(daily)} FCFA/jour · solde ${money(savingsOf(c.id,plan))}${(()=>{const a=savArrears(c.id,plan);return a>0?` · <span style="color:var(--red);font-weight:700">${a} j retard</span>`:"";})()}</div><div class="act">${act}</div></div>`;
   }).join(""):`<div class="empty">Aucun épargnant.${canEdit()?" Ajoutez-en un avec « + Épargnant ».":""}</div>`;
   // soldes
   const bals=svs.map(c=>({c,b:savingsOf(c.id,plan),d:+c[k].daily||0})).filter(x=>x.b>0||x.d>0).sort((a,b)=>b.b-a.b);
@@ -601,18 +666,22 @@ function renderSavCarnet(el){
   if(!c||!c[k]){el.innerHTML=`<div class="empty">Épargnant introuvable.</div>`;return;}
   const daily=+c[k].daily||0;const since=c[k].since||"";const bal=savingsOf(clientId,plan);const t=bizDay();
   const movs=SAV.filter(s=>s.data.clientId===clientId&&(s.data.plan||"express")===plan).slice().sort((a,b)=>(b.data.date||"").localeCompare(a.data.date||""));
-  const collN=movs.filter(s=>s.data.type!=="retrait"&&s.data.kind==="jour").length;
-  let cells="";for(let i=29;i>=0;i--){const dd=addDays(t,-i);const has=SAV.some(s=>s.data.clientId===clientId&&(s.data.plan||"express")===plan&&s.data.date===dd&&s.data.type!=="retrait");const hol=isHoliday(dd);const bg=has?'var(--green-l)':(hol?'#f6edda':(dd===t?'#eef2f7':'var(--red-l)'));const mk=has?'✓':(hol?'F':'·');cells+=`<div title="${fmtDate(dd)}${hol?' (férié)':''}" ${canEdit()?`onclick="toggleSavDay('${clientId}','${plan}','${dd}')"`:""} style="width:26px;height:26px;border-radius:6px;background:${bg};display:grid;place-items:center;font-size:11px;font-weight:700${canEdit()?';cursor:pointer':''}">${mk}</div>`;}
+  const expDays=savExpectedDays(clientId,plan);const savedDays=savedDaysOf(clientId,plan);const arr=savArrears(clientId,plan);
+  const collectedToday=SAV.some(s=>s.data.clientId===clientId&&(s.data.plan||"express")===plan&&s.data.date===t&&s.data.type!=="retrait");
+  // calendrier basé sur le montant épargné : les 1ers jours collecte sont couverts par le solde
+  let cells="";if(since){let idx=0;for(let i=34;i>=0;i--){const dd=addDays(t,-i);if(dd<since)continue;const hol=isHoliday(dd);let bg,mk;if(hol){bg='#f6edda';mk='F';}else{idx=Math.max(0,diffDays(since,dd)+1-holidaysInRange(since,dd));if(idx<=savedDays){bg='var(--green-l)';mk='✓';}else if(dd<t){bg='var(--red-l)';mk='·';}else{bg='#eef2f7';mk='·';}}cells+=`<div title="${fmtDate(dd)}${hol?' (férié)':''}" style="width:26px;height:26px;border-radius:6px;background:${bg};display:grid;place-items:center;font-size:11px;font-weight:700">${mk}</div>`;}}
   el.innerHTML=`
   <div class="searchbar no-print"><div class="row"><button class="btn alt" onclick="go('${plan}')">← ${info.label}</button>${canEdit()?`<button class="btn" onclick="window.print()">🖨️ Imprimer</button><button class="btn alt" onclick="savePDF('epargne-${(c.name||'').replace(/[^a-zA-Z0-9]+/g,'_')}-${t}')">📄 PDF</button>`:""}${c.phone?`<button class="btn green" onclick="sendSavWhatsApp('${clientId}','${plan}')">📲 WhatsApp</button>`:""}</div></div>
   <div class="card"><img src="${LOGO}" alt="AFRIKAPITAL" style="height:40px;margin-bottom:8px"><div class="phead"><h2>${esc(c.name)}</h2><div class="status">${info.label} · ${fmtDate(t)}</div></div>
     <div class="bal"><span>Montant journalier</span><b>${money(daily)} FCFA${canEdit()?` <a href="#" class="no-print" onclick="editSaverDaily('${clientId}','${plan}');return false" style="color:var(--teal)">✏️ modifier</a>`:""}</b></div>
     <div class="bal"><span>Solde actuel</span><b style="color:var(--teal)">${money(bal)} FCFA</b></div>
     ${since?`<div class="bal"><span>Épargne depuis</span><b>${fmtDate(since)}</b></div>`:""}
-    <div class="bal"><span>Jours collectés (via l'appli)</span><b>${collN}</b></div>
-    <div style="margin-top:10px"><div class="sb" style="margin-bottom:6px">30 derniers jours (✓ collecté · · non collecté)</div><div style="display:flex;flex-wrap:wrap;gap:5px">${cells}</div></div>
+    <div class="bal"><span>Jours attendus / épargnés</span><b>${expDays} / ${savedDays}</b></div>
+    <div class="bal"><span>Retard</span><b style="color:${arr>0?'var(--red)':'var(--green)'}">${arr>0?arr+" j ("+money(arr*daily)+")":"aucun"}</b></div>
+    <div style="margin-top:10px"><div class="sb" style="margin-bottom:6px">Derniers jours (✓ épargné · · non épargné · F férié)</div><div style="display:flex;flex-wrap:wrap;gap:5px">${cells||'<span class="sb">—</span>'}</div></div>
+    <div class="act no-print" style="margin-top:10px">${!collectedToday?`<button class="btn green" onclick="collectSavToday('${clientId}','${plan}')">✓ Épargne du jour (${money(daily)})</button>`:`<span class="status">✓ Épargne du jour collectée</span>`}${arr>0?`<button class="btn" style="background:var(--gold)" onclick="paySavArrear('${clientId}','${plan}')">➕ Payer un retard (${arr} j)</button>`:""}</div>
   </div>
-  <div class="card"><h2 style="margin-bottom:8px">Mouvements</h2>${movs.length?movs.map(s=>{const isRet=s.data.type==="retrait";return `<div class="mv"><div><div class="nm">${isRet?"Retrait":"Dépôt"}${s.data.note?" — "+esc(s.data.note):""}</div><div class="sb">${fmtDate(s.data.date)}${s.data.by&&s.data.by!=="import"?" · "+esc(String(s.data.by).split("@")[0]):(s.data.by==="import"?" · import":"")}</div></div><div class="sp"></div><b style="color:${isRet?'var(--red)':'var(--green)'}">${isRet?"-":"+"}${money(s.data.amount)}</b></div>`;}).join(""):`<div class="empty">Aucun mouvement.</div>`}</div>`;
+  <div class="card"><h2 style="margin-bottom:8px">Mouvements</h2>${movs.length?movs.map(s=>{const isRet=s.data.type==="retrait";return `<div class="mv"><div><div class="nm">${isRet?"Retrait":"Dépôt"}${s.data.kind==="retard"?" (retard)":""}${s.data.note?" — "+esc(s.data.note):""}</div><div class="sb">${fmtDate(s.data.date)}${s.data.by&&s.data.by!=="import"?" · "+esc(String(s.data.by).split("@")[0]):(s.data.by==="import"?" · import":"")}</div></div><div class="sp"></div><b style="color:${isRet?'var(--red)':'var(--green)'}">${isRet?"-":"+"}${money(s.data.amount)}</b></div>`;}).join(""):`<div class="empty">Aucun mouvement.</div>`}</div>`;
 }
 function sendSavWhatsApp(clientId,plan){
   const c=CLIENTS.find(x=>x.id===clientId);if(!c)return;const phone=waPhone(c.phone);if(!phone){toast("Numéro manquant");return;}
@@ -745,16 +814,55 @@ function renderRelances(el){
 }
 
 /* ---------- JOURNAL DES RETARDS ---------- */
-function renderRetards(el){
-  const rows=LOANS.map(l=>({l,s:loanStats(l)})).filter(r=>r.s.status!=="solde"&&r.s.arrearsDays>0).sort((a,b)=>b.s.arrearsDays-a.s.arrearsDays);
-  const totDays=rows.reduce((x,r)=>x+r.s.arrearsDays,0),totAmt=rows.reduce((x,r)=>x+r.s.arrears,0);
+function renderKPI(el){
+  const t=bizDay();
+  const active=LOANS.map(l=>({l,s:loanStats(l)})).filter(r=>r.s.status!=="solde");
+  const encours=active.reduce((a,r)=>a+r.s.balance,0);
+  const capitalActif=active.reduce((a,r)=>a+(+r.l.data.capital||0),0);
+  const interet=active.reduce((a,r)=>a+((+r.l.data.total||0)-(+r.l.data.capital||0)),0);
+  const collected=LOANS.reduce((a,l)=>a+((l.data.payments||[]).reduce((x,p)=>x+(+p.amount||0),0)),0);
+  const arrearsAmt=active.reduce((a,r)=>a+(r.s.arrears||0),0);
+  const arrearsBal=active.filter(r=>r.s.arrearsDays>0).reduce((a,r)=>a+r.s.balance,0);
+  const avgDur=active.length?Math.round(active.reduce((a,r)=>a+(+r.l.data.duration||50),0)/active.length):50;
+  const caisse=closeFor(t)||0;
+  const bank=BANK.reduce((a,b)=>a+((b.data.type==="depot")?1:-1)*(+b.data.amount||0),0);
+  const epargne=CLIENTS.reduce((a,c)=>a+savingsOf(c.id,"express")+savingsOf(c.id,"koor"),0);
+  const recouvrement=(collected+arrearsAmt)>0?collected/(collected+arrearsAmt)*100:100;
+  const tauxRetard=encours>0?arrearsBal/encours*100:0;
+  const rendement=capitalActif>0?interet/capitalActif*100:0;
+  const rendementAn=rendement*(360/avgDur);
+  const rotation=avgDur>0?360/avgDur:0;
+  const liquidite=epargne>0?(caisse+bank)/epargne:null;
+  const FR=caisse+bank+encours-epargne;
+  const BFR=encours-epargne;
+  const card=(label,val,desc,color)=>`<div class="card"><div class="sb" style="text-transform:uppercase;letter-spacing:.5px">${label}</div><div style="font-size:24px;font-weight:800;color:${color||'var(--ink)'};margin:2px 0">${val}</div><div class="sb">${desc}</div></div>`;
   el.innerHTML=`
-  <div class="kpis" style="grid-template-columns:1fr 1fr"><div class="kpi"><div class="l">Clients en retard</div><div class="v" style="color:var(--red)">${rows.length}</div></div><div class="kpi"><div class="l">Montant en retard</div><div class="v" style="font-size:16px">${money(totAmt)}</div></div></div>
-  <div class="status" style="margin-bottom:10px">Quand un client rattrape un jour manqué, appuyez sur « Régler ». Chaque règlement enregistre un versement (compte dans la caisse du jour).</div>
-  <div id="retList"></div>`;
-  const host=$("retList");
-  if(!rows.length){host.innerHTML=`<div class="empty">🎉 Aucun retard. Tout le monde est à jour !</div>`;return;}
-  host.innerHTML=rows.map(({l,s})=>`<div class="item"><div class="topbar" style="margin:0;background:none;border:none;padding:0"><div><div class="nm">${esc(clientName(l.data.clientId))}</div><div class="sb">${s.arrearsDays} jour(s) manqué(s) · ${money(s.daily)}/j · total dû ${money(s.arrears)}</div></div><span class="pill red">${s.arrearsDays} j</span></div><div class="act"><button class="btn green" onclick="payArrear('${l.id}',1)">Régler 1 jour (${money(s.daily)})</button>${s.arrearsDays>1?`<button class="btn gold" onclick="if(confirm('Régler les ${s.arrearsDays} jours de retard (${money(s.arrears)}) ?'))payArrear('${l.id}',${s.arrearsDays})">Régler tout (${s.arrearsDays} j)</button>`:""}</div></div>`).join("");
+  <div class="searchbar no-print"><div class="row">${canEdit()?`<button class="btn" onclick="window.print()">🖨️ Imprimer</button><button class="btn alt" onclick="savePDF('kpi-${t}')">📄 PDF</button>`:""}</div></div>
+  <div class="card"><img src="${LOGO}" alt="AFRIKAPITAL" style="height:40px;margin-bottom:8px"><div class="phead"><h2>KPI / Indicateurs</h2><div class="status">AFRIKAPITAL · ${fmtDate(t)}</div></div>
+    <div class="status" style="margin-top:6px">Encours ${money(encours)} · Épargne détenue ${money(epargne)} · Caisse ${money(caisse)}${bank?" · Banque "+money(bank):""}</div>
+  </div>
+  ${card("Taux de recouvrement",recouvrement.toFixed(1)+" %","Sommes encaissées ÷ sommes dues à ce jour. Plus c'est haut, mieux c'est.",recouvrement>=90?'var(--green)':'var(--gold)')}
+  ${card("Taux de retard (portefeuille à risque)",tauxRetard.toFixed(1)+" %","Encours des prêts en retard ÷ encours total. Plus c'est bas, mieux c'est.",tauxRetard<=10?'var(--green)':'var(--red)')}
+  ${card("Rendement du portefeuille",rendement.toFixed(1)+" % par cycle","Intérêts ÷ capital prêté — soit environ "+rendementAn.toFixed(0)+" % par an (cycle moyen de "+avgDur+" jours).",'var(--teal)')}
+  ${card("Rotation du capital",rotation.toFixed(1)+" fois / an","Combien de fois le capital est prêté puis remboursé dans l'année (360 ÷ durée moyenne).")}
+  ${card("Ratio de liquidité",liquidite===null?"—":liquidite.toFixed(2),"(Caisse + Banque) ÷ Épargne détenue. ≥ 1 = l'épargne des clients est couverte par tes liquidités.",liquidite!==null&&liquidite>=1?'var(--green)':'var(--red)')}
+  ${card("Fonds de roulement (FR)",money(FR)+" FCFA","(Caisse + Banque + Encours prêts) − Épargne détenue. Ce que tu possèdes net à court terme.",FR>=0?'var(--green)':'var(--red)')}
+  ${card("Besoin en fonds de roulement (BFR)",money(BFR)+" FCFA","Encours des prêts − Épargne détenue. Rappel : Trésorerie nette = FR − BFR = "+money(caisse+bank)+".")}`;
+}
+function renderRetards(el){
+  const loanRet=LOANS.map(l=>({l,s:loanStats(l)})).filter(r=>r.s.status!=="solde"&&r.s.arrearsDays>0).sort((a,b)=>b.s.arrearsDays-a.s.arrearsDays);
+  const savRet=[];["express","koor"].forEach(plan=>{savers(plan).forEach(c=>{const a=savArrears(c.id,plan);if(a>0)savRet.push({c,plan,a,daily:+((c[planCfgKey(plan)]||{}).daily)||0});});});
+  savRet.sort((a,b)=>b.a-a.a);
+  const totAmt=loanRet.reduce((x,r)=>x+r.s.arrears,0)+savRet.reduce((x,r)=>x+r.a*r.daily,0);
+  el.innerHTML=`
+  <div class="status" style="margin-bottom:10px">Tous les clients en retard. Ouvre un client et paie <b>un ou plusieurs jours</b> de retard (le montant est plafonné au solde restant).</div>
+  <div class="kpis" style="grid-template-columns:repeat(3,1fr)">
+    <div class="kpi"><div class="l">Prêts en retard</div><div class="v" style="color:var(--red)">${loanRet.length}</div></div>
+    <div class="kpi"><div class="l">Épargne en retard</div><div class="v" style="color:var(--red)">${savRet.length}</div></div>
+    <div class="kpi"><div class="l">Total en retard</div><div class="v" style="font-size:15px;color:var(--red)">${money(totAmt)}</div></div>
+  </div>
+  <div class="card"><h2 style="margin-bottom:8px">Prêts en retard — ${loanRet.length}</h2>${loanRet.length?loanRet.map(({l,s})=>`<div class="item"><div class="nm">${esc(clientName(l.data.clientId))}</div><div class="sb"><span style="color:var(--red);font-weight:700">${s.arrearsDays} j de retard (${money(s.arrears)})</span> · reste ${money(s.balance)}</div><div class="act"><button class="btn" style="background:var(--gold)" onclick="payLoanArrear('${l.id}')">➕ Payer un/des retard(s)</button><button class="btn ghost sm" onclick="openCarnet('${l.data.clientId}')" title="Carnet">📖</button></div></div>`).join(""):`<div class="empty">🎉 Aucun prêt en retard.</div>`}</div>
+  <div class="card"><h2 style="margin-bottom:8px">Épargne en retard — ${savRet.length}</h2>${savRet.length?savRet.map(({c,plan,a,daily})=>`<div class="item"><div class="nm">${esc(c.name)} <span class="sb">(${EP[plan].label})</span></div><div class="sb"><span style="color:var(--red);font-weight:700">${a} j de retard (${money(a*daily)})</span></div><div class="act"><button class="btn" style="background:var(--gold)" onclick="paySavArrear('${c.id}','${plan}')">➕ Payer un/des retard(s)</button><button class="btn ghost sm" onclick="openSavCarnet('${c.id}','${plan}')" title="Carnet">📖</button></div></div>`).join(""):`<div class="empty">🎉 Aucune épargne en retard.</div>`}</div>`;
 }
 
 /* ---------- CARNET DU CLIENT ---------- */
@@ -815,6 +923,7 @@ function renderCarnet(el){
       <div class="bal"><span>Payé / Reste</span><b>${money(s.paid)} / ${money(s.balance)}</b></div>
       <div class="bal"><span>Retard</span><b style="color:${s.arrearsDays>0?'var(--red)':'var(--green)'}">${s.arrearsDays>0?s.arrearsDays+" j ("+money(s.arrears)+")":"aucun"}</b></div>
       <div style="margin-top:10px"><div class="sb" style="margin-bottom:6px">Calendrier (✓ payé · · non versé · F férié)${canEdit()?" — touchez un jour pour marquer payé / non payé":""}</div><div style="display:flex;flex-wrap:wrap;gap:5px">${cells||'<span class="sb">—</span>'}</div></div>
+      ${s.status!=="solde"&&s.arrearsDays>0?`<button class="btn full no-print" style="margin-top:10px;background:var(--gold)" onclick="payLoanArrear('${l.id}')">➕ Payer un retard (${s.arrearsDays} j)</button>`:""}
       ${canEdit()?`<div class="act no-print" style="margin-top:10px"><button class="btn alt" onclick="openEditLoan('${l.id}')">✏️ Modifier</button>${s.status!=="solde"?`<button class="btn gold" onclick="soldeLoan('${l.id}')">💰 Solder ce prêt (reste ${money(s.balance)})</button>`:""}</div>`:""}
     </div>`;
   }).join(""):`<div class="empty">Aucun prêt pour ce client.</div>`}`;
