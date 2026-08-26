@@ -300,6 +300,8 @@ const NAV=[
   {v:"caisse",ic:"🧮",label:"Caisse",roles:["gerant","collectrice"]},
   {v:"feries",ic:"📅",label:"Jours fériés",roles:["gerant"]},
   {sep:"Analyse"},
+  {v:"decision",ic:"🧭",label:"Aide à la décision",roles:["gerant"]},
+  {v:"scoring",ic:"⭐",label:"Notation clients",roles:["gerant"]},
   {v:"kpi",ic:"📈",label:"KPI / Indicateurs",roles:["gerant"]},
   {v:"compta",ic:"📊",label:"Comptabilité / Trésorerie",roles:["gerant"]},
   {v:"banque",ic:"🏦",label:"Banque",roles:["gerant"]},
@@ -317,6 +319,7 @@ const VIEWS={
   retards:{title:"Journal des retards",sub:"Payer un ou plusieurs jours de retard",render:renderRetards},
   relances:{title:"Relances WhatsApp",sub:"Rappels aux clients en retard",render:renderRelances},
   carnet:{title:"Carnet du client",sub:"Détail des versements",render:renderCarnet},
+  releve:{title:"Relevé client",sub:"Historique complet du client",render:renderReleve},
   clients:{title:"Clients",sub:"Répertoire des clients",render:renderClients},
   loans:{title:"Prêts / Crédits",sub:"Crédits accordés",render:renderLoans},
   express:{title:"Épargne Express",sub:"Court terme — liste dédiée",render:()=>renderEp("express")},
@@ -335,6 +338,8 @@ const VIEWS={
   sauvegarde:{title:"Sauvegarde / Export",sub:"Protéger vos données",render:renderSauvegarde},
   compta:{title:"Comptabilité / Trésorerie",sub:"Situation financière",render:renderCompta},
   kpi:{title:"KPI / Indicateurs",sub:"Performance du portefeuille",render:renderKPI},
+  scoring:{title:"Notation clients",sub:"Classement 🟢🔵🟡🔴 & plafonds",render:renderScoring},
+  decision:{title:"Aide à la décision",sub:"Intuition → données → risque → décision",render:renderDecision},
   banque:{title:"Banque",sub:"Transferts caisse ↔ banque",render:renderBank},
   renouv:{title:"Renouvellements",sub:"Selon le remboursement",render:renderRenouv},
 };
@@ -465,7 +470,7 @@ function renderColRows(){
     return `<div class="item"><div class="nm">${esc(clientName(l.data.clientId))}</div><div class="sb">Jour ${s.elapsed}/${s.dur} · Attendu ${money(s.daily)} · Reçu ${s.paidToday?`<b style="color:var(--green)">${money(s.daily)}</b>`:`<span style="color:var(--red)">—</span>`} · reste ${money(s.balance)}${s.arrearsDays>0?` · <span style="color:var(--red);font-weight:700">${s.arrearsDays} j retard (${money(s.arrears)})</span>`:""}</div><div class="act">${act}</div></div>`;
   }).join("");
 }
-async function pay(loanId){const l=LOANS.find(x=>x.id===loanId);if(!l)return;const s=loanStats(l);const t=bizDay();if(s.paidToday){toast("Déjà payé aujourd'hui");return;}if(s.balance<=0){toast("Prêt déjà soldé");return;}const amount=Math.min(s.daily,s.balance);const snap=JSON.stringify(l.data);const d=l.data;d.payments=d.payments||[];d.payments.push({date:t,amount,by:ME.email,kind:"jour"});await pushLoan(l,"Versement du jour enregistré",snap);}
+async function pay(loanId){const l=LOANS.find(x=>x.id===loanId);if(!l)return;const s=loanStats(l);const t=bizDay();if(s.paidToday){toast("Déjà payé aujourd'hui");return;}if(s.balance<=0){toast("Prêt déjà soldé");return;}const amount=Math.min(s.daily,s.balance);const snap=JSON.stringify(l.data);const d=l.data;d.payments=d.payments||[];d.payments.push({date:t,amount,by:ME.email,kind:"jour",ts:Date.now()});await pushLoan(l,"Versement du jour enregistré",snap);}
 async function payLoanArrear(loanId){
   const l=LOANS.find(x=>x.id===loanId);if(!l)return;
   const s=loanStats(l);
@@ -480,7 +485,7 @@ async function payLoanArrear(loanId){
   while(day<t&&g<3000){if(!isHoliday(day)&&!paidDates.has(day))unpaid.push(day);day=addDays(day,1);g++;}
   const toPay=unpaid.slice(0,n);
   let remaining=s.balance,done=0;const snap=JSON.stringify(d);
-  for(const dd of toPay){if(remaining<=0)break;const amt=Math.min(s.daily,remaining);d.payments.push({date:dd,amount:amt,by:ME.email,kind:"jour"});remaining-=amt;done++;}
+  for(const dd of toPay){if(remaining<=0)break;const amt=Math.min(s.daily,remaining);d.payments.push({date:dd,amount:amt,by:ME.email,kind:"jour",ts:Date.now()});remaining-=amt;done++;}
   if(done===0){toast("Aucun retard à payer");return;}
   await pushLoan(l,done+" jour(s) de retard payé(s)"+(done<n?" (plafonné au solde)":""),snap);
 }
@@ -508,12 +513,12 @@ async function toggleLoanDay(loanId,dISO){
   const l=LOANS.find(x=>x.id===loanId);if(!l)return;const d=l.data;d.payments=d.payments||[];
   const idx=d.payments.findIndex(p=>p.date===dISO&&p.kind!=="solde");const snap=JSON.stringify(d);
   if(idx>=0){d.payments.splice(idx,1);await pushLoan(l,fmtDate(dISO)+" : marqué NON versé",snap);}
-  else{const s=loanStats(l);if(s.balance<=0){toast("Prêt déjà soldé");return;}const amt=Math.min(s.daily,s.balance);d.payments.push({date:dISO,amount:amt,by:ME.email,kind:"jour"});await pushLoan(l,fmtDate(dISO)+" : marqué versé",snap);}
+  else{const s=loanStats(l);if(s.balance<=0){toast("Prêt déjà soldé");return;}const amt=Math.min(s.daily,s.balance);d.payments.push({date:dISO,amount:amt,by:ME.email,kind:"jour",ts:Date.now()});await pushLoan(l,fmtDate(dISO)+" : marqué versé",snap);}
 }
 async function cancelPay(loanId){if(!canEdit()){toast("Réservé au gérant");return;}const l=LOANS.find(x=>x.id===loanId);if(!l)return;const t=bizDay();const d=l.data;const pays=d.payments||[];let idx=-1;for(let i=pays.length-1;i>=0;i--){if(pays[i].date===t&&pays[i].kind!=="retard"&&pays[i].kind!=="solde"){idx=i;break;}}if(idx<0){toast("Aucun versement du jour à annuler");return;}if(!confirm("Annuler le versement du jour de "+clientName(d.clientId)+" ?"))return;const snap=JSON.stringify(d);pays.splice(idx,1);d.payments=pays;await pushLoan(l,"Versement annulé",snap);}
 async function cancelCollect(clientId,plan){if(!canEdit()){toast("Réservé au gérant");return;}const t=bizDay();const row=SAV.find(s=>s.data.clientId===clientId&&(s.data.plan||"express")===plan&&s.data.date===t&&s.data.type!=="retrait");if(!row){toast("Rien à annuler");return;}if(!confirm("Annuler la collecte d'épargne du jour de "+clientName(clientId)+" ?"))return;const {error}=await sb.from("savings").delete().eq("id",row.id);if(error){toast("Annulation impossible");return;}toast("Collecte annulée");loadAll();}
 async function payArrear(loanId,n){const l=LOANS.find(x=>x.id===loanId);if(!l)return;const s=loanStats(l);if(s.arrearsDays<=0){toast("Aucun retard");return;}if(s.balance<=0){toast("Ce prêt est déjà soldé");return;}n=Math.min(n||1,s.arrearsDays);const t=bizDay();const snap=JSON.stringify(l.data);const d=l.data;d.payments=d.payments||[];let remaining=s.balance,done=0;for(let i=0;i<n&&remaining>0;i++){const amt=Math.min(s.daily,remaining);d.payments.push({date:t,amount:amt,by:ME.email,kind:"retard"});remaining-=amt;done++;}const msg=done+" jour(s) de retard réglé(s)"+(done<n?" (plafonné au solde restant)":"");await pushLoan(l,msg,snap);}
-async function soldeLoan(loanId){if(!canEdit()){toast("Réservé au gérant");return;}const l=LOANS.find(x=>x.id===loanId);if(!l)return;const s=loanStats(l);if(s.balance<=0){toast("Déjà soldé");return;}if(!confirm("Solder le prêt de "+clientName(l.data.clientId)+" ? Encaisser le reste de "+money(s.balance)+" FCFA et clôturer."))return;const t=bizDay();const snap=JSON.stringify(l.data);const d=l.data;d.payments=d.payments||[];d.payments.push({date:t,amount:s.balance,by:ME.email,kind:"solde"});d.status="solde";await pushLoan(l,"Prêt soldé ✓",snap);}
+async function soldeLoan(loanId){if(!canEdit()){toast("Réservé au gérant");return;}const l=LOANS.find(x=>x.id===loanId);if(!l)return;const s=loanStats(l);if(s.balance<=0){toast("Déjà soldé");return;}if(!confirm("Solder le prêt de "+clientName(l.data.clientId)+" ? Encaisser le reste de "+money(s.balance)+" FCFA et clôturer."))return;const t=bizDay();const snap=JSON.stringify(l.data);const d=l.data;d.payments=d.payments||[];d.payments.push({date:t,amount:s.balance,by:ME.email,kind:"solde",ts:Date.now()});d.status="solde";await pushLoan(l,"Prêt soldé ✓",snap);}
 async function pushLoan(l,okMsg,snap){
   render(); // reflète tout de suite le pointage à l'écran
   const {ok,error}=await withRetry(()=>sb.from("loans").update({data:l.data,updated_at:new Date().toISOString(),updated_by:ME.id}).eq("id",l.id));
@@ -543,7 +548,7 @@ function renderCliRows(){
   host.innerHTML=list.map(c=>{
     const loans=LOANS.filter(l=>l.data.clientId===c.id).map(loanStats);const active=loans.filter(s=>s.status!=="solde");const enc=active.reduce((x,s)=>x+s.balance,0);
     const badge=active.some(s=>s.status==="retard")?'<span class="pill red">retard</span>':(active.length?'<span class="pill green">à jour</span>':'<span class="pill gray">soldé</span>');
-    return `<div class="mv"><div style="width:38px;height:38px;border-radius:50%;background:var(--teal-l);color:var(--teal-d);display:grid;place-items:center;font-weight:800;flex:none">${initials(c.name)}</div><div><div class="nm">${esc(c.name)}</div><div class="sb">${esc(c.phone||"")}${active.length?" · encours "+money(enc):""}</div></div><div class="sp"></div>${badge} <button class="btn ghost sm" onclick="openCarnet('${c.id}')">📖</button>${canEdit()?` <button class="btn ghost sm" onclick="openLoanFor('${c.id}')">+prêt</button><button class="btn ghost sm" onclick="openCli('${c.id}')">✏️</button><button class="btn ghost sm" onclick="delCli('${c.id}')">🗑️</button>`:""}</div>`;
+    return `<div class="mv"><div onclick="openReleve('${c.id}')" style="display:flex;gap:12px;align-items:center;flex:1;cursor:pointer;min-width:0"><div style="width:38px;height:38px;border-radius:50%;background:var(--teal-l);color:var(--teal-d);display:grid;place-items:center;font-weight:800;flex:none">${initials(c.name)}</div><div style="min-width:0"><div class="nm">${esc(c.name)}</div><div class="sb">${esc(c.phone||"")}${active.length?" · encours "+money(enc):""} · <span style="color:var(--teal)">voir le relevé ›</span></div></div></div>${badge} <button class="btn ghost sm" onclick="openCarnet('${c.id}')">📖</button>${canEdit()?` <button class="btn ghost sm" onclick="openLoanFor('${c.id}')">+prêt</button><button class="btn ghost sm" onclick="openCli('${c.id}')">✏️</button><button class="btn ghost sm" onclick="delCli('${c.id}')">🗑️</button>`:""}</div>`;
   }).join("");
 }
 function openCli(id){if(!canEdit()){toast("Réservé au gérant");return;}const c=id?CLIENTS.find(x=>x.id===id):null;$("cliTitle").textContent=c?"Modifier le client":"Nouveau client";$("cId").value=c?c.id:"";$("cName").value=c?c.name||"":"";$("cPhone").value=c?c.phone||"":"";$("cAct").value=c?c.activity||"":"";$("cLoanBtn").style.display=c?"":"none";hide("cMsg");$("ovCli").classList.add("show");setTimeout(()=>$("cName").focus(),50);}
@@ -814,6 +819,174 @@ function renderRelances(el){
 }
 
 /* ---------- JOURNAL DES RETARDS ---------- */
+function scoreClient(clientId){
+  const loans=LOANS.filter(l=>l.data.clientId===clientId).map(l=>({l,s:loanStats(l)}));
+  if(!loans.length)return null;
+  const totalFinance=loans.reduce((a,x)=>a+(+x.l.data.capital||0),0);
+  const active=loans.filter(x=>x.s.status!=="solde");
+  const encours=active.reduce((a,x)=>a+x.s.balance,0);
+  const nbCredits=loans.length;
+  let nbRemb=0,latePay=0,arrearPay=0,caGenere=0,marge=0;
+  loans.forEach(x=>{const total=+x.l.data.total||1;const cap=+x.l.data.capital||0;const interet=total-cap;
+    (x.l.data.payments||[]).forEach(p=>{nbRemb++;const amt=+p.amount||0;caGenere+=amt;marge+=amt*(interet/total);
+      if(p.kind==="retard")arrearPay++;
+      if(p.ts){const hh=new Date(p.ts).getHours();if(hh>=20||hh<5)latePay++;}
+    });
+  });
+  const joursRetard=active.reduce((a,x)=>a+(x.s.arrearsDays||0),0);
+  const coutRisque=active.reduce((a,x)=>a+(x.s.arrears||0),0);
+  const retards=arrearPay+latePay;
+  const starts=loans.map(x=>x.l.data.startDate).filter(Boolean).sort();
+  const anciennete=starts.length?Math.max(0,diffDays(starts[0],bizDay())):0;
+  const plafondActuel=loans.reduce((a,x)=>Math.max(a,+x.l.data.capital||0),0);
+  let score=100;
+  score-=joursRetard*3;
+  score-=latePay*2;
+  score-=arrearPay*1;
+  if(totalFinance>0&&coutRisque>0)score-=Math.min(20,Math.round(coutRisque/totalFinance*100));
+  score+=Math.min(12,Math.floor(anciennete/30));
+  score=Math.max(0,Math.min(100,Math.round(score)));
+  let cat,color,factor;
+  if(score>=85){cat="Premium";color="#1f9d55";factor=1.5;}
+  else if(score>=70){cat="Fiable";color="#2b6cb0";factor=1.25;}
+  else if(score>=50){cat="À surveiller";color="#b7791f";factor=1;}
+  else{cat="Risque élevé";color="#c53030";factor=0.5;}
+  const plafondReco=Math.max(0,Math.round(plafondActuel*factor/5000)*5000);
+  return {clientId,totalFinance,encours,nbCredits,nbRemb,retards,joursRetard,caGenere,marge:Math.round(marge),coutRisque,anciennete,plafondActuel,plafondReco,score,cat,color,latePay};
+}
+function aladdinDecision(sc){
+  const gap=Math.max(0,sc.plafondReco-sc.plafondActuel);const inArrears=sc.joursRetard>0;
+  let credit;
+  if(sc.cat==="Risque élevé")credit={verb:"Réduire / geler le plafond",target:sc.plafondReco,color:"#c53030",reason:"Historique à risque : limiter l'exposition."};
+  else if(inArrears)credit={verb:"Maintenir — attendre régularisation",target:sc.plafondActuel,color:"#b7791f",reason:"Retard en cours : pas de hausse avant remise à jour."};
+  else if(sc.cat==="Premium"&&gap>0)credit={verb:"Augmenter le plafond",target:sc.plafondReco,color:"#1f9d55",reason:"Excellent historique : hausse de "+money(gap)+" possible."};
+  else if(sc.cat==="Fiable"&&gap>0)credit={verb:"Augmenter (prudent)",target:sc.plafondReco,color:"#2b6cb0",reason:"Bon historique : hausse modérée de "+money(gap)+"."};
+  else credit={verb:"Maintenir le plafond",target:sc.plafondActuel,color:"#555",reason:"Situation stable."};
+  credit.gap=gap;
+  let rec;const jr=sc.joursRetard;
+  if(jr<=0)rec={verb:"Aucune action",prio:0,color:"#1f9d55",reason:"Client à jour."};
+  else if(jr<=2)rec={verb:"Rappel amical (WhatsApp)",prio:1,color:"#2b6cb0",reason:jr+" j de retard."};
+  else if(jr<=5)rec={verb:"Relance rapprochée (appel + WhatsApp)",prio:2,color:"#b7791f",reason:jr+" j de retard."};
+  else if(jr<=10)rec={verb:"Visite terrain",prio:3,color:"#dd6b20",reason:jr+" j de retard."};
+  else rec={verb:"Recouvrement urgent / restructuration",prio:4,color:"#c53030",reason:jr+" j de retard."};
+  rec.montant=sc.coutRisque;rec.weight=jr*((sc.coutRisque||0)+1);
+  return {credit,recovery:rec};
+}
+function decisionAnalyze(clientId,proposed){
+  const sc=scoreClient(clientId);
+  if(!sc){return {sc:null,proposed,reco:0,ratio:0,riskPts:35,level:"Modéré",color:"#b7791f",verdict:"Accorder avec prudence",vcolor:"#b7791f",action:"Nouveau client sans historique : commence par un petit montant et observe son comportement de remboursement.",inArrears:false,isNew:true};}
+  const reco=sc.plafondReco||sc.plafondActuel||proposed;
+  const ratio=reco>0?proposed/reco:(proposed>0?9:0);
+  const inArrears=sc.joursRetard>0;
+  let riskPts=0;
+  if(inArrears)riskPts+=40;
+  if(sc.cat==="Risque élevé")riskPts+=40;else if(sc.cat==="À surveiller")riskPts+=20;else if(sc.cat==="Fiable")riskPts+=5;
+  if(ratio>1.3)riskPts+=30;else if(ratio>1)riskPts+=15;
+  if(sc.anciennete<30)riskPts+=15;else if(sc.anciennete<90)riskPts+=5;
+  if(sc.latePay>0)riskPts+=Math.min(10,sc.latePay*3);
+  riskPts=Math.max(0,Math.min(100,riskPts));
+  let level,color,verdict,vcolor,action;
+  if(riskPts<25){level="Faible";color="#1f9d55";verdict="Accorder";vcolor="#1f9d55";action="Le montant est cohérent avec le profil du client. Feu vert.";}
+  else if(riskPts<55){level="Modéré";color="#b7791f";verdict="Accorder avec prudence";vcolor="#b7791f";action="Envisage un montant plafonné à "+money(reco)+" et un suivi rapproché.";}
+  else{level="Élevé";color="#c53030";verdict="Refuser ou réduire";vcolor="#c53030";action=inArrears?"Régulariser d'abord les retards ("+sc.joursRetard+" j) avant tout nouveau crédit.":"Trop risqué pour ce montant. Limiter à "+money(reco)+" ou refuser.";}
+  return {sc,proposed,reco,ratio,riskPts,level,color,verdict,vcolor,action,inArrears,isNew:false};
+}
+let _dec={clientId:"",amount:"",result:null};
+function decAnalyze(){
+  const clientId=$("decClient").value;const amount=+($("decAmount").value)||0;
+  _dec.clientId=clientId;_dec.amount=$("decAmount").value;
+  if(!clientId){toast("Choisis un client");return;}
+  if(amount<=0){toast("Saisis un montant");return;}
+  _dec.result=decisionAnalyze(clientId,amount);
+  renderDecision($("content"));
+}
+function renderDecision(el){
+  const opts=CLIENTS.slice().sort((a,b)=>(a.name||"").localeCompare(b.name||"")).map(c=>`<option value="${c.id}" ${_dec.clientId===c.id?"selected":""}>${esc(c.name)}</option>`).join("");
+  const r=_dec.result;
+  const step=(n,title,body)=>`<div class="card"><div class="phead" style="border:none"><h2 style="font-size:15px">${n} ${title}</h2></div>${body}</div>`;
+  const m=(lbl,val,col)=>`<div style="display:flex;justify-content:space-between;gap:8px;font-size:13px;padding:3px 0"><span class="sb">${lbl}</span><b${col?` style="color:${col}"`:""}>${val}</b></div>`;
+  el.innerHTML=`
+  <div class="status" style="margin-bottom:10px">Ton <b>intuition</b> formule une hypothèse · tes <b>données</b> la vérifient · ton <b>système</b> mesure le risque · <b>tu</b> décides.</div>
+  ${step("🧠 1.","Ton intuition — l'hypothèse",`
+    <label>Client concerné</label>
+    <select id="decClient">${opts||`<option value="">Aucun client</option>`}</select>
+    <label style="margin-top:8px">Montant du crédit que tu envisages (FCFA)</label>
+    <input type="number" id="decAmount" value="${esc(_dec.amount||"")}" placeholder="ex. 200000">
+    <button class="btn full" style="margin-top:12px" onclick="decAnalyze()">Vérifier avec les données →</button>`)}
+  ${r?`
+  ${step("📊 2.","Tes données la vérifient",r.isNew?`<div class="status">Nouveau client : aucun historique de crédit dans l'appli.</div>`:`
+    ${m("Notation",r.sc.cat+" · "+r.sc.score+"/100",r.sc.color)}
+    ${m("Ancienneté",r.sc.anciennete+" jours")}
+    ${m("Crédits / remboursements",r.sc.nbCredits+" / "+r.sc.nbRemb)}
+    ${m("Encours actuel",money(r.sc.encours))}
+    ${m("Jours de retard",r.sc.joursRetard,r.sc.joursRetard>0?"var(--red)":"var(--green)")}
+    ${m("Versements après 20h",r.sc.latePay)}
+    ${m("Chiffre d'affaires généré",money(r.sc.caGenere))}
+    ${m("Plafond actuel → recommandé",money(r.sc.plafondActuel)+" → "+money(r.reco),r.sc.color)}`)}
+  ${step("⚖️ 3.","Ton système mesure le risque",`
+    ${m("Montant envisagé",money(r.proposed))}
+    ${!r.isNew?m("Rapport au plafond recommandé",(r.ratio*100).toFixed(0)+" %",r.ratio>1?"var(--red)":"var(--green)"):""}
+    <div style="margin-top:8px"><div style="display:flex;justify-content:space-between"><span class="sb">Niveau de risque</span><b style="color:${r.color}">${r.level} (${r.riskPts}/100)</b></div>
+      <div style="height:12px;border-radius:8px;background:var(--line);margin-top:4px;overflow:hidden"><div style="height:100%;width:${r.riskPts}%;background:${r.color}"></div></div>
+    </div>`)}
+  ${step("✅ 4.","Tu prends la décision",`
+    <div style="text-align:center;padding:8px 0"><div style="font-size:22px;font-weight:800;color:${r.vcolor}">${r.verdict}</div><div class="sb" style="margin-top:4px">${r.action}</div></div>
+    <div class="act" style="margin-top:8px">${canEdit()?`<button class="btn green" onclick="openLoanFor('${_dec.clientId}')">Accorder ce prêt →</button>`:""}<button class="btn alt" onclick="_dec={clientId:'',amount:'',result:null};renderDecision($('content'))">Nouvelle analyse</button></div>
+    <p class="sb" style="margin-top:8px">C'est une <b>recommandation</b>. La décision finale te revient — c'est toi qui accordes.</p>`)}
+  `:""}`;
+  if($("decClient")&&_dec.clientId)$("decClient").value=_dec.clientId;
+}
+let _scoreFilter="tous";
+function renderScoring(el){
+  const t=bizDay();
+  const ids=[...new Set(LOANS.map(l=>l.data.clientId))];
+  let rows=ids.map(scoreClient).filter(Boolean);
+  rows.forEach(r=>r.dec=aladdinDecision(r));
+  rows.sort((a,b)=>b.score-a.score);
+  const counts={Premium:0,Fiable:0,"À surveiller":0,"Risque élevé":0};rows.forEach(r=>counts[r.cat]++);
+  // Aladdin — agrégats portefeuille
+  const expansion=rows.filter(r=>r.dec.credit.verb.indexOf("Augmenter")===0).reduce((a,r)=>a+r.dec.credit.gap,0);
+  const nExpand=rows.filter(r=>r.dec.credit.verb.indexOf("Augmenter")===0).length;
+  const capitalRisque=rows.reduce((a,r)=>a+(r.coutRisque||0),0);
+  const encoursRisque=rows.filter(r=>r.cat==="Risque élevé").reduce((a,r)=>a+r.encours,0);
+  const toRecover=rows.filter(r=>r.dec.recovery.prio>0).sort((a,b)=>b.dec.recovery.weight-a.dec.recovery.weight);
+  const fmap={tous:null,premium:"Premium",fiable:"Fiable",surveiller:"À surveiller",risque:"Risque élevé"};
+  const shown=_scoreFilter==="tous"?rows:rows.filter(r=>r.cat===fmap[_scoreFilter]);
+  const dot=c=>`<span style="display:inline-block;width:10px;height:10px;border-radius:50%;background:${c};margin-right:6px"></span>`;
+  const m=(lbl,val)=>`<div style="display:flex;justify-content:space-between;gap:8px;font-size:12.5px;padding:2px 0"><span class="sb">${lbl}</span><b>${val}</b></div>`;
+  const dec=(title,d,extra)=>`<div style="border-left:3px solid ${d.color};padding:4px 0 4px 8px;margin-top:6px"><div style="font-size:12px;color:${d.color};font-weight:700">${title} : ${d.verb}${extra||""}</div><div class="sb">${d.reason}</div></div>`;
+  el.innerHTML=`
+  <div class="searchbar no-print"><div class="row">${canEdit()?`<button class="btn" onclick="window.print()">🖨️ Imprimer</button><button class="btn alt" onclick="savePDF('scoring-${t}')">📄 PDF</button>`:""}</div></div>
+  <div class="card"><img src="${LOGO}" alt="AFRIKAPITAL" style="height:40px;margin-bottom:8px"><div class="phead"><h2>Notation des clients</h2><div class="status">AFRIKAPITAL · ${fmtDate(t)}</div></div>
+    <div class="row" style="margin-top:8px;gap:14px;flex-wrap:wrap"><span>${dot("#1f9d55")}Premium <b>${counts.Premium}</b></span><span>${dot("#2b6cb0")}Fiable <b>${counts.Fiable}</b></span><span>${dot("#b7791f")}À surveiller <b>${counts["À surveiller"]}</b></span><span>${dot("#c53030")}Risque élevé <b>${counts["Risque élevé"]}</b></span></div>
+  </div>
+  <div class="card" style="border:1px solid var(--teal)"><div class="phead" style="border:none"><h2 style="font-size:15px">🧠 Moteur de décision (mini-Aladdin)</h2></div>
+    <div class="sb" style="margin-bottom:8px">Transforme les données de chaque client en décisions d'expansion de plafond et de recouvrement.</div>
+    <div class="bal"><span>💹 Capacité d'expansion du crédit</span><b style="color:var(--green)">${money(expansion)}</b></div>
+    <div class="sb">Montant supplémentaire prêtable à ${nExpand} client(s) fiables sans retard.</div>
+    <div class="bal" style="margin-top:6px"><span>⚠️ Capital à risque (retards)</span><b style="color:var(--red)">${money(capitalRisque)}</b></div>
+    <div class="sb">Dont ${money(encoursRisque)} d'encours sur les clients « risque élevé ».</div>
+    <div class="bal" style="margin-top:6px"><span>📞 Clients à recouvrer</span><b>${toRecover.length}</b></div>
+    ${toRecover.length?`<div style="margin-top:6px"><div class="sb" style="margin-bottom:4px">Priorités de recouvrement :</div>${toRecover.slice(0,6).map(r=>`<div class="mv"><div><div class="nm" style="font-size:13px">${esc(clientName(r.clientId))}</div><div class="sb" style="color:${r.dec.recovery.color}">${r.dec.recovery.verb}</div></div><div class="sp"></div><span class="sb">${r.joursRetard} j · ${money(r.coutRisque)}</span></div>`).join("")}</div>`:`<div class="sb" style="margin-top:4px;color:var(--green)">🎉 Aucun recouvrement en attente.</div>`}
+  </div>
+  <div class="row no-print" style="margin-bottom:10px;gap:6px;flex-wrap:wrap">${Object.keys(fmap).map(k=>`<button class="btn ${_scoreFilter===k?'':'alt'} sm" onclick="_scoreFilter='${k}';renderScoring($('content'))">${k==='tous'?'Tous':fmap[k]}</button>`).join("")}</div>
+  ${shown.map(r=>`<div class="card"><div class="phead" style="border:none"><h2 style="font-size:15px">${dot(r.color)}${esc(clientName(r.clientId))}</h2><span class="pill" style="background:${r.color};color:#fff">${r.cat} · ${r.score}/100</span></div>
+    ${m("Montant total financé",money(r.totalFinance))}
+    ${m("Encours actuel",money(r.encours))}
+    ${m("Nombre de crédits",r.nbCredits)}
+    ${m("Nombre de remboursements",r.nbRemb)}
+    ${m("Retards (incidents)",r.retards+(r.latePay?` (dont ${r.latePay} après 20h)`:""))}
+    ${m("Jours de retard",r.joursRetard)}
+    ${m("Chiffre d'affaires généré",money(r.caGenere))}
+    ${m("Marge générée",money(r.marge))}
+    ${m("Coût du risque",money(r.coutRisque))}
+    ${m("Ancienneté",r.anciennete+" jours")}
+    ${m("Plafond actuel",money(r.plafondActuel))}
+    <div style="display:flex;justify-content:space-between;gap:8px;font-size:13px;padding:6px 0;margin-top:4px;border-top:1px dashed var(--line)"><span><b>Plafond recommandé</b></span><b style="color:${r.color}">${money(r.plafondReco)}</b></div>
+    ${dec("🏦 Décision crédit",r.dec.credit,r.dec.credit.gap>0&&r.dec.credit.verb.indexOf("Augmenter")===0?" → "+money(r.dec.credit.target):"")}
+    ${dec("📞 Recouvrement",r.dec.recovery,r.dec.recovery.montant>0?" ("+money(r.dec.recovery.montant)+")":"")}
+  </div>`).join("")||`<div class="empty">Aucun client dans cette catégorie.</div>`}`;
+}
 function renderKPI(el){
   const t=bizDay();
   const active=LOANS.map(l=>({l,s:loanStats(l)})).filter(r=>r.s.status!=="solde");
@@ -891,6 +1064,40 @@ function sendCarnetWhatsApp(clientId){
   window.open(url,"_blank");
 }
 function openCarnet(clientId){_carnetClient=clientId;go("carnet");}
+let _releveClient=null;
+function openReleve(clientId){_releveClient=clientId;go("releve");}
+function renderReleve(el){
+  const clientId=_releveClient;const c=CLIENTS.find(x=>x.id===clientId);
+  if(!c){el.innerHTML='<div class="empty">Client introuvable.</div>';return;}
+  const t=bizDay();const sc=scoreClient(clientId);
+  const loans=LOANS.filter(l=>l.data.clientId===clientId).map(l=>({l,s:loanStats(l)})).sort((a,b)=>(b.l.data.startDate||"").localeCompare(a.l.data.startDate||""));
+  const pays=[];loans.forEach(({l})=>{(l.data.payments||[]).forEach(p=>{if(p.date&&/^\d{4}-\d{2}-\d{2}$/.test(p.date))pays.push({date:p.date,amount:+p.amount||0,kind:p.kind,by:p.by,cap:+l.data.capital||0});});});
+  pays.sort((a,b)=>(b.date||"").localeCompare(a.date||""));
+  const hasKoor=c.epKoor&&+c.epKoor.daily>0,hasExp=c.epExpress&&+c.epExpress.daily>0;
+  const koorBal=savingsOf(clientId,"koor"),expBal=savingsOf(clientId,"express"),koorAr=savArrears(clientId,"koor"),expAr=savArrears(clientId,"express");
+  const dot=sc?`<span style="display:inline-block;width:11px;height:11px;border-radius:50%;background:${sc.color};margin-right:6px"></span>`:"";
+  const fn=(c.name||"client").replace(/[^a-zA-Z0-9]+/g,'_');
+  el.innerHTML=`
+  <div class="searchbar no-print"><div class="row"><button class="btn alt" onclick="go('clients')">← Clients</button>${canEdit()?`<button class="btn" onclick="window.print()">🖨️ Imprimer</button><button class="btn alt" onclick="savePDF('releve-${fn}-${t}')">📄 PDF</button><button class="btn green" onclick="openLoanFor('${clientId}')">+ Prêt</button>`:""}</div></div>
+  <div class="card"><img src="${LOGO}" alt="AFRIKAPITAL" style="height:40px;margin-bottom:8px"><div class="phead"><h2>${dot}${esc(c.name)}</h2><div class="status">Relevé client · ${fmtDate(t)}</div></div>
+    ${c.phone?`<div class="bal"><span>Téléphone</span><b>${esc(c.phone)}</b></div>`:""}
+    ${c.activity?`<div class="bal"><span>Activité</span><b>${esc(c.activity)}</b></div>`:""}
+    ${sc?`<div class="bal"><span>Notation</span><b style="color:${sc.color}">${sc.cat} · ${sc.score}/100</b></div><div class="bal"><span>Ancienneté</span><b>${sc.anciennete} jours</b></div>`:""}
+  </div>
+  ${sc?`<div class="card"><h2 style="margin-bottom:8px">Résumé</h2>
+    <div class="bal"><span>Montant total financé</span><b>${money(sc.totalFinance)}</b></div>
+    <div class="bal"><span>Encours actuel</span><b>${money(sc.encours)}</b></div>
+    <div class="bal"><span>Crédits / remboursements</span><b>${sc.nbCredits} / ${sc.nbRemb}</b></div>
+    <div class="bal"><span>Jours de retard</span><b style="color:${sc.joursRetard>0?'var(--red)':'var(--green)'}">${sc.joursRetard}</b></div>
+    <div class="bal"><span>Chiffre d'affaires généré</span><b>${money(sc.caGenere)}</b></div>
+    <div class="bal"><span>Marge générée</span><b>${money(sc.marge)}</b></div>
+    <div class="bal"><span>Coût du risque</span><b>${money(sc.coutRisque)}</b></div>
+    <div class="bal"><span>Plafond actuel → recommandé</span><b style="color:${sc.color}">${money(sc.plafondActuel)} → ${money(sc.plafondReco)}</b></div>
+  </div>`:""}
+  <div class="card"><h2 style="margin-bottom:8px">Historique des prêts — ${loans.length}</h2>${loans.length?loans.map(({l,s})=>{const pct=s.total?Math.min(100,Math.round(s.paid/s.total*100)):0;const st=s.status==="solde"?'<span style="color:var(--green);font-weight:700">✅ soldé</span>':(s.arrearsDays>0?`<span style="color:var(--red);font-weight:700">${s.arrearsDays} j de retard</span>`:'<span style="color:var(--green)">à jour</span>');return `<div class="item"><div class="nm">${money(s.cap)} FCFA · ${st}</div><div class="sb">${fmtDate(s.start)} → ${fmtDate(s.end)} · ${pct}% payé · payé ${money(s.paid)} · reste ${money(s.balance)}</div><div class="act no-print"><button class="btn ghost sm" onclick="openCarnet('${clientId}')">📖 Carnet</button></div></div>`;}).join(""):`<div class="empty">Aucun prêt.</div>`}</div>
+  ${(hasKoor||hasExp)?`<div class="card"><h2 style="margin-bottom:8px">Épargne</h2>${hasKoor?`<div class="bal"><span>Koor — solde</span><b>${money(koorBal)}${koorAr>0?` · <span style="color:var(--red)">${koorAr} j retard</span>`:""}</b></div>`:""}${hasExp?`<div class="bal"><span>Express — solde</span><b>${money(expBal)}${expAr>0?` · <span style="color:var(--red)">${expAr} j retard</span>`:""}</b></div>`:""}</div>`:""}
+  <div class="card"><h2 style="margin-bottom:8px">Derniers versements — ${pays.length}</h2>${pays.length?pays.slice(0,50).map(p=>`<div class="mv"><div><div class="nm">${money(p.amount)}</div><div class="sb">${fmtDate(p.date)}${p.kind==="retard"?" · retard":(p.kind==="solde"?" · solde":"")}${p.by&&p.by!=="import"?" · "+esc(String(p.by).split("@")[0]):(p.by==="import"?" · import":"")}</div></div><div class="sp"></div><span class="sb">prêt ${money(p.cap)}</span></div>`).join(""):`<div class="empty">Aucun versement enregistré.</div>`}</div>`;
+}
 function renderCarnet(el){
   const c=CLIENTS.find(x=>x.id===_carnetClient);
   if(!c){el.innerHTML=`<div class="empty">Sélectionnez un client depuis l'onglet Clients (bouton 📖).</div>`;return;}
@@ -1101,7 +1308,36 @@ function renderSauvegarde(el){
     <button class="btn alt full" style="margin-top:10px" onclick="exportLoansCSV()">📄 Exporter les prêts (CSV pour Excel)</button>
     <button class="btn alt full" style="margin-top:10px" onclick="exportSavingsCSV()">📄 Exporter l'épargne (CSV pour Excel)</button>
     <p class="sb" style="margin-top:10px">La sauvegarde JSON contient <b>toutes</b> vos données. En cas de problème, elle permet de tout restaurer. Les fichiers CSV s'ouvrent dans Excel pour vos analyses.</p>
+  </div>
+  <div class="card"><h2 style="margin-bottom:8px">Restaurer une sauvegarde</h2>
+    <input type="file" id="restoreFile" accept="application/json,.json" onchange="restoreBackup(event)" style="display:none">
+    <button class="btn gold full" onclick="$('restoreFile').click()">♻️ Restaurer depuis un fichier JSON</button>
+    <div id="restoreMsg"></div>
+    <p class="sb" style="margin-top:10px">Choisissez un fichier <b>afrikapital-sauvegarde-….json</b>. ⚠️ La restauration <b>remplace toutes les données actuelles</b> par celles de la sauvegarde. À utiliser si vous avez perdu ou abîmé vos données.</p>
   </div>`;
+}
+async function restoreBackup(ev){
+  if(!canEdit()){toast("Réservé au gérant");return;}
+  const file=ev.target.files&&ev.target.files[0];if(!file)return;
+  let data;try{data=JSON.parse(await file.text());}catch(e){toast("Fichier illisible");ev.target.value="";return;}
+  if(!data||data.app!=="AFRIKAPITAL"||!Array.isArray(data.clients)){toast("Ce n'est pas une sauvegarde AFRIKAPITAL");ev.target.value="";return;}
+  const nc=(data.clients||[]).length,nl=(data.loans||[]).length,ns=(data.savings||[]).length;
+  if(!confirm("Restaurer cette sauvegarde ?\n\n"+nc+" clients · "+nl+" prêts · "+ns+" mouvements d'épargne.\n\n⚠️ ATTENTION : cela REMPLACE toutes les données actuelles de l'application.")){ev.target.value="";return;}
+  show("restoreMsg","",""); const set=m=>{const el=$("restoreMsg");if(el)el.innerHTML='<div class="status" style="margin-top:8px">'+m+'</div>';};
+  set("Restauration en cours… ne fermez pas l'appli.");
+  try{
+    for(const [tbl,arr] of [["loans",LOANS],["savings",SAV],["expenses",EXP],["cashbook",CASH],["clients",CLIENTS]]){
+      for(const row of arr){try{await sb.from(tbl).delete().eq("id",row.id);}catch(e){}}
+    }
+    let done=0,fail=0;
+    for(const c of data.clients){const d={...c};delete d.id;const {error}=await sb.from("clients").insert({id:c.id,data:d,updated_by:ME.id});if(error)fail++;else done++;}
+    for(const x of (data.loans||[])){const {error}=await sb.from("loans").insert({id:x.id,data:x.data,updated_by:ME.id});if(error)fail++;else done++;}
+    for(const x of (data.savings||[])){const {error}=await sb.from("savings").insert({id:x.id,data:x.data,updated_by:ME.id});if(error)fail++;else done++;}
+    for(const x of (data.expenses||[])){const {error}=await sb.from("expenses").insert({id:x.id,data:x.data,updated_by:ME.id});if(error)fail++;else done++;}
+    for(const x of (data.cashbook||[])){const {error}=await sb.from("cashbook").insert({id:x.id,data:x.data,updated_by:ME.id});if(error)fail++;else done++;}
+    set("✅ Restauration terminée : "+done+" éléments restaurés"+(fail?(" · "+fail+" échecs"):"")+".");
+    toast("Restauration terminée");ev.target.value="";loadAll();
+  }catch(e){set("⚠️ Erreur pendant la restauration. Réessayez.");toast("Erreur restauration");}
 }
 function _download(filename,text,type){
   try{const blob=new Blob([text],{type:type||"text/plain;charset=utf-8"});const url=URL.createObjectURL(blob);const a=document.createElement("a");a.href=url;a.download=filename;document.body.appendChild(a);a.click();setTimeout(()=>{document.body.removeChild(a);URL.revokeObjectURL(url);},1500);toast("Fichier généré");}catch(e){toast("Téléchargement impossible sur cet appareil");}
