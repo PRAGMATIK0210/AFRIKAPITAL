@@ -1583,9 +1583,24 @@ function renderInterets(el){
   });
   const months=Object.keys(byMonth).sort().reverse();
   const thisYm=bizDay().slice(0,7);const cur=byMonth[thisYm]||{col:0,int:0,nb:0};
+  // Tendance : projection fin de mois au rythme du portefeuille actif
+  const tp=bizDay().split("-").map(Number);const daysInMonth=new Date(tp[0],tp[1],0).getDate();const daysElapsed=tp[2];const remaining=Math.max(0,daysInMonth-daysElapsed);
+  let dailyInt=0,dailyCol=0;
+  LOANS.forEach(l=>{const s=loanStats(l);if(s.status==="solde")return;const total=s.total||0;const frac=total>0?(total-s.cap)/total:0;const dcol=Math.min(s.daily,s.balance);dailyInt+=dcol*frac;dailyCol+=dcol;});
+  const projInt=Math.round(cur.int+remaining*dailyInt);const projCol=Math.round(cur.col+remaining*dailyCol);
   el.innerHTML=`
   <div class="searchbar no-print"><div class="row"><div class="status" style="align-self:center;flex:1">Intérêt = 10 % du capital, reconnu au fil des versements encaissés.</div>${canEdit()?`<button class="btn" onclick="window.print()">🖨️</button><button class="btn alt" onclick="savePDF('interets-${bizDay()}')">📄 PDF</button>`:""}</div></div>
   <div class="kpis" style="grid-template-columns:1fr 1fr"><div class="kpi"><div class="l">Intérêts ce mois (${moisLabel(thisYm)})</div><div class="v" style="color:var(--gold);font-size:16px">${money(cur.int)}</div></div><div class="kpi"><div class="l">Intérêts cumulés</div><div class="v" style="font-size:16px">${money(grandInt)}</div></div></div>
+  <div class="card" style="border:1px solid var(--gold);background:linear-gradient(135deg,#fff,#fdf7e8)"><div class="phead" style="border:none"><h2 style="font-size:15px">📈 Tendance du mois — projection fin ${moisLabel(thisYm)}</h2></div>
+    <div class="sb" style="margin-bottom:6px">Si tu continues à ce rythme (les prêts actifs versent chaque jour) :</div>
+    <div class="bal"><span>Intérêts déjà gagnés ce mois</span><b style="color:var(--gold)">${money(cur.int)}</b></div>
+    <div class="bal"><span>Rythme (intérêt attendu / jour)</span><b>${money(Math.round(dailyInt))}</b></div>
+    <div class="bal"><span>Jours restants (travaillés) dans le mois</span><b>${remaining} j (sur ${daysInMonth})</b></div>
+    <div class="bal"><span>Reste à gagner d'ici la fin du mois</span><b style="color:var(--green)">+${money(Math.round(remaining*dailyInt))}</b></div>
+    <div class="bal" style="border-top:2px solid var(--ink);margin-top:4px;padding-top:8px"><span><b>Projection intérêts fin de mois</b></span><b style="color:var(--gold);font-size:18px">${money(projInt)}</b></div>
+    <div class="bal"><span>Projection encaissé fin de mois</span><b>${money(projCol)}</b></div>
+    <div class="sb" style="margin-top:6px">Calcul sur ${daysInMonth} jours travaillés (collecte tous les jours) et le versement journalier des ${LOANS.filter(l=>loanStats(l).status!=="solde").length} prêts actifs. Seuls les retards éventuels peuvent réduire ce montant.</div>
+  </div>
   <div class="card"><img src="${LOGO}" alt="AFRIKAPITAL" style="height:40px;margin-bottom:8px"><div class="phead"><h2>Intérêts gagnés par mois</h2><div class="status">AFRIKAPITAL · ${fmtDate(bizDay())}</div></div>
     <div style="overflow-x:auto">${months.length?`<table style="width:100%;border-collapse:collapse;font-size:13.5px" class="print-table"><thead><tr style="text-align:left;border-bottom:2px solid var(--ink)"><th>Mois</th><th style="text-align:right">Encaissé</th><th style="text-align:right">Dont intérêts</th><th style="text-align:right">Versements</th></tr></thead><tbody>${months.map(ym=>`<tr style="border-bottom:1px solid var(--line)"><td>${moisLabel(ym)}</td><td style="text-align:right">${money(byMonth[ym].col)}</td><td style="text-align:right;color:var(--gold);font-weight:700">${money(byMonth[ym].int)}</td><td style="text-align:right">${byMonth[ym].nb}</td></tr>`).join("")}<tr style="font-weight:800;border-top:2px solid var(--ink)"><td>TOTAL</td><td style="text-align:right">${money(grandCol)}</td><td style="text-align:right;color:var(--gold)">${money(grandInt)}</td><td></td></tr></tbody></table>`:`<div class="empty">Aucun versement encaissé.</div>`}</div>
     <p class="sb" style="margin-top:8px">Estimation : sur chaque versement, la part d'intérêt correspond à la proportion intérêt/total du prêt. Sur toute la durée, cela totalise exactement les 10 % du capital.</p>
