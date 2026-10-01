@@ -1,0 +1,21 @@
+{
+  "name": "AFRIKAPITAL",
+  "short_name": "AFRIKAPITAL",
+  "description": "Gestion de crédit et d'épargne — collecte journalière",
+  "id": "/AFRIKAPITAL/app.html",
+  "start_url": "app.html",
+  "scope": ".",
+  "display": "standalone",
+  "orientation": "portrait",
+  "background_color": "#0e7c86",
+  "theme_color": "#0e7c86",
+  "lang": "fr",
+  "dir": "ltr",
+  "categories": ["finance", "business", "productivity"],
+  "icons": [
+    { "src": "icon-192.png", "sizes": "192x192", "type": "image/png", "purpose": "any" },
+    { "src": "icon.png", "sizes": "512x512", "type": "image/png", "purpose": "any" },
+    { "src": "icon-maskable-192.png", "sizes": "192x192", "type": "image/png", "purpose": "maskable" },
+    { "src": "icon-maskable-512.png", "sizes": "512x512", "type": "image/png", "purpose": "maskable" }
+  ]
+}
