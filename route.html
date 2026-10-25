@@ -1,7 +1,16 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Route to Market</title>
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Public+Sans:wght@400;500;600;700;800&family=IBM+Plex+Mono:wght@500;600&display=swap">
 <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
+<!-- Supabase (base de données partagée, en temps réel, entre tous les utilisateurs) -->
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+</head>
+<body>
 <style>
   :root{
     color-scheme: light;
@@ -155,9 +164,12 @@
   .progress > div{ height:100%; background:var(--accent); border-radius:99px; }
 
   label.field{ display:flex; flex-direction:column; gap:5px; font-size:12.5px; font-weight:600; color:var(--text-secondary); }
-  input[type=text],input[type=number],input[type=tel],input[type=date],select,textarea{
+  input[type=text],input[type=number],input[type=tel],input[type=date],input[type=password],select,textarea{
     padding:8px 10px; border-radius:var(--radius-sm); border:1px solid var(--border-strong); background:var(--surface); color:var(--text-primary); width:100%; }
   textarea{ resize:vertical; min-height:64px; }
+  input[type=file]{ font-size:12.5px; color:var(--text-secondary); width:100%; }
+  .pricing-thumb{ width:52px; height:52px; border-radius:var(--radius-sm); object-fit:cover; border:1px solid var(--border); cursor:pointer; background:var(--surface-2,#f2f2f2); }
+  .pricing-photo-preview{ width:180px; height:180px; border-radius:var(--radius-sm); object-fit:cover; border:1px solid var(--border-strong); cursor:pointer; }
   .form-grid{ display:grid; grid-template-columns:1fr 1fr; gap:12px; }
   .checkbox-row{ display:flex; align-items:center; gap:8px; font-size:13px; font-weight:600; }
   .chip-select{ display:flex; flex-wrap:wrap; gap:6px; }
@@ -214,21 +226,108 @@
 <div class="toast-root" id="toast-root"></div>
 
 <script>
+/* ============================== CONFIGURATION SUPABASE ============================== */
+/* Remplacez les valeurs ci-dessous par celles de VOTRE projet Supabase (Project Settings > API >
+   Project URL, et Project API keys > anon public). Voir le guide de déploiement fourni avec ce
+   fichier pour la marche à suivre complète (une seule étape : exécuter un script SQL). */
+const SUPABASE_CONFIG = {
+  url: "https://dxrhbtlaprxdvomzujgb.supabase.co",
+  anonKey: "sb_publishable_O9qz6cQ1lUZfR5qYD5hwbw_szyM_JSI",
+};
+function supabaseConfigured(){
+  return !!(SUPABASE_CONFIG.url && !String(SUPABASE_CONFIG.url).startsWith('COLLEZ_ICI')
+    && SUPABASE_CONFIG.anonKey && !String(SUPABASE_CONFIG.anonKey).startsWith('COLLEZ_ICI'));
+}
+/* Déclenche un téléchargement standard du navigateur (export Excel / PDF). */
+const LocalDownloads = {
+  save: async ({filename, data}) => {
+    const url = URL.createObjectURL(data);
+    const a = document.createElement('a');
+    a.href = url; a.download = filename;
+    document.body.appendChild(a); a.click(); a.remove();
+    setTimeout(()=>URL.revokeObjectURL(url), 4000);
+  }
+};
+/* Petite couche de compatibilité : donne à la base Supabase (PostgreSQL + temps réel) la même
+   forme d'API que celle utilisée partout ailleurs dans ce fichier (collection().add(),
+   collection().orderBy().limit().onSnapshot(), doc().update()/.set()) — copiée du style
+   Firestore utilisé dans la version d'origine hébergée sur Claude. Grâce à cette couche, AUCUNE
+   autre ligne de la logique métier de l'application n'a besoin d'être modifiée. */
+/* Chaque table Supabase a une forme volontairement générique et identique :
+     id (text, clé primaire), fields (jsonb, toutes les données métier), created_at.
+   On évite ainsi d'avoir à faire correspondre une colonne SQL précise à chaque
+   propriété utilisée dans le code JS (nom, statut, commercialId, ...) : tout vit
+   dans "fields" et ce shim le présente comme un objet JS normal, exactement
+   comme le ferait Firestore avec doc.data(). Trois tables (visites, fiches
+   superviseur, relevés de prix) ont en plus une colonne générée "date" (copiée
+   depuis fields->>'date') uniquement pour permettre le tri "les plus récents
+   d'abord" côté base — voir supabase-schema.sql. */
+function makeSupabaseDbShim(sb){
+  function buildQuery(name, opts){
+    return {
+      orderBy(field, dir){ return buildQuery(name, Object.assign({}, opts, {orderField:field, orderDir:dir})); },
+      limit(n){ return buildQuery(name, Object.assign({}, opts, {limitN:n})); },
+      onSnapshot(cb, errCb){
+        let stopped = false;
+        async function fetchAndEmit(){
+          if(stopped) return;
+          let q = sb.from(name).select('id,fields');
+          if(opts.orderField) q = q.order(opts.orderField, {ascending: opts.orderDir !== 'desc'});
+          if(opts.limitN) q = q.limit(opts.limitN);
+          const { data, error } = await q;
+          if(stopped) return;
+          if(error){ if(errCb) errCb(error); return; }
+          cb({ docs: (data||[]).map(row=>({ id: row.id, data: () => (row.fields || {}) })) });
+        }
+        fetchAndEmit();
+        // Supabase Realtime livre des évènements ligne par ligne (insert/update/delete) ; par
+        // simplicité et robustesse on se contente de tout re-charger à chaque évènement plutôt que
+        // de recalculer l'état localement — largement suffisant à cette échelle (~25 comptes).
+        const channel = sb.channel('rtm-'+name+'-'+Math.random().toString(36).slice(2))
+          .on('postgres_changes', {event:'*', schema:'public', table:name}, ()=>fetchAndEmit())
+          .subscribe();
+        return () => { stopped = true; sb.removeChannel(channel); };
+      }
+    };
+  }
+  function collection(name){
+    return Object.assign(buildQuery(name, {}), {
+      add: async (data) => {
+        const { data: row, error } = await sb.from(name).insert({ fields: data }).select('id').single();
+        if(error) throw error;
+        return { id: row.id };
+      }
+    });
+  }
+  function doc(path){
+    const idx = path.indexOf('/');
+    const name = path.slice(0, idx), id = path.slice(idx+1);
+    return {
+      // Comme Firestore : update() ne modifie que les clés fournies, le reste de "fields" est conservé.
+      update: async (data) => {
+        const { data: existing, error: selErr } = await sb.from(name).select('fields').eq('id', id).single();
+        if(selErr) throw selErr;
+        const merged = Object.assign({}, existing.fields || {}, data);
+        const { error } = await sb.from(name).update({ fields: merged }).eq('id', id);
+        if(error) throw error;
+      },
+      // Comme Firestore : set() remplace entièrement le document.
+      set: async (data) => {
+        const { error } = await sb.from(name).upsert({ id, fields: data });
+        if(error) throw error;
+      },
+    };
+  }
+  return { collection, doc };
+}
+
 /* ============================== STATE ============================== */
 const APP = {
-  db: null, downloads: null, dbReady:false,
-  profils: new Map(), clients: new Map(), produits: new Map(), visites: new Map(), fiches: new Map(),
+  db: null, downloads: null, dbReady:false, sb:null, configError:false,
+  profils: new Map(), clients: new Map(), produits: new Map(), visites: new Map(), fiches: new Map(), relevesPrix: new Map(),
   currentUser: null,
   route: null,
 };
-const RAISONS_NON_ACHAT = [
-  "Rupture de stock chez le client","Client fermé / absent","Prix jugé trop élevé",
-  "Pas de besoin actuellement","Problème de paiement / crédit","Autre"
-];
-const JOURS_FR = ["Dimanche","Lundi","Mardi","Mercredi","Jeudi","Vendredi","Samedi"];
-/* Liste de concurrents à adapter à votre marché — modifiable ici pour alimenter la liste déroulante
-   du commercial et du superviseur lors de l'identification de la concurrence en boutique. */
-const CONCURRENTS = ["Vitalait","Nestlé","Patisen","Siagro","Kirene","Salam","SEDIMA","Produit importé générique","Autre"];
 const SECTEURS_DATA = {
   'DAKAR 1': {chef:'ALIOUNE FALL', superviseur:'SAID BEN HADJ', zones:['DAKAR PLATEAU','REUBEUSS','MEDINA','FASS','GUEULE TAPEE','COLOBANE','FANN POINT E AMITIE','HLM OUAGOU NIAYES','NIARI TALLY BEN TALLY','DIEUPPEUL DERKLE','GRAND DAKAR','SACRE CŒUR','LIBERTE 6','SCAT URBAM','SUD FOIRE','OUEST FOIRE','GRAND YOFF','ZONE DE CAPTAGE','HLM PATTE D OIE','KHAR YALLA','MERMOZ','OUAKAM','ALMADIES','NGOR']},
   'DAKAR 2': {chef:'VIEUX SALOUM SONKO', superviseur:'SAID BEN HADJ', zones:['PATTE D\'OIE','PARCELLES ASSAINIES DE 01 A 26','NORD FOIRE','DIAMALAYE','YOFF APECSY','CAMBERENE','SOPRIM','FADIA','GOLF','GUEDIEWAYE','GADAYE','WAKHINANE NIMZAT','MEDINA GOUNASS']},
@@ -242,8 +341,14 @@ const SECTEURS_DATA = {
   'AXE SUD': {chef:'BAMBA SAGNA', superviseur:'FAMARA BADJI', zones:['KEUR MADIABEL','NDOFFANE','DINGUIRAYE','KEUR SOCE','LAT MINGUE','POROKHANE','NIORO','BIGNONA','ZGUINCHOR','CAP SKIRRING','CABROUSSE','KAFOUNTINE','OUSSOUYE','SEDHOU']},
 };
 const SECTEUR_NAMES = Object.keys(SECTEURS_DATA);
-const PRODUCT_CATEGORIES = [{"id":"cat1","nom":"PRODUIT CHARCUTERIE"},{"id":"cat2","nom":"PRODUIT GLACE"},{"id":"cat3","nom":"PRODUIT YAOURT"},{"id":"cat4","nom":"PRODUIT SUPERETTE"}];
-const SEED_DATA = {"profils":[{"id":"p_alioune","nom":"Alioune Fall","role":"commercial","secteur":"DAKAR 1","actif":true,"fonction":"Chef de secteur"},{"id":"p_vieux","nom":"Vieux Saloum Sonko","role":"commercial","secteur":"DAKAR 2","actif":true,"fonction":"Chef de secteur"},{"id":"p_amadou","nom":"Amadou Mactar Seck","role":"commercial","secteur":"DAKAR 3","actif":true,"fonction":"Chef de secteur"},{"id":"p_iba","nom":"Iba Ndiaye","role":"commercial","secteur":"DAKAR 4","actif":true,"fonction":"Chef de secteur"},{"id":"p_yaya","nom":"Yaya Badji","role":"commercial","secteur":"REGION CENTRE","actif":true,"fonction":"Chef de secteur"},{"id":"p_tidiane","nom":"Tidiane Dia","role":"commercial","secteur":"REGION CENTRE ET SUD EST","fonction":"Chef de secteur","actif":true},{"id":"p_medoune","nom":"Medoune Tew Diene","role":"commercial","secteur":"PETITE COTE","fonction":"Chef de secteur","actif":true},{"id":"p_demba_an","nom":"Demba Diallo","role":"commercial","secteur":"AXE NORD","fonction":"Chef de secteur","actif":true},{"id":"p_demba_ane","nom":"Demba Diallo","role":"commercial","secteur":"AXE NORD EST","fonction":"Chef de secteur","actif":true},{"id":"p_bamba","nom":"Bamba Sagna","role":"commercial","secteur":"AXE SUD","fonction":"Chef de secteur","actif":true},{"id":"p_cv_abdel","nom":"Abdel","role":"commercial","secteur":"AXE NORD","fonction":"Cash van (hors glaces)","actif":true},{"id":"p_cv_almamy","nom":"Al Mamy Diedhiou","role":"commercial","secteur":"DAKAR 1","fonction":"Cash van (hors glaces)","actif":true},{"id":"p_cv_maad","nom":"Maad","role":"commercial","secteur":"DAKAR 1","fonction":"Cash van (hors glaces)","actif":true},{"id":"p_cv_alytoure","nom":"Aly Toure","role":"commercial","secteur":"DAKAR 2","fonction":"Cash van (hors glaces)","actif":true},{"id":"p_cv_ibrahima","nom":"Ibrahima Balde","role":"commercial","secteur":"DAKAR 3","fonction":"Cash van (hors glaces)","actif":true},{"id":"p_cv_abdoulaziz","nom":"Abdoul Aziz Diallo","role":"commercial","secteur":"DAKAR 4","fonction":"Cash van (hors glaces)","actif":true},{"id":"p_cv_acg_d4","nom":"ACG","role":"commercial","secteur":"DAKAR 4","fonction":"Cash van (hors glaces)","actif":true},{"id":"p_cv_acg_rc","nom":"ACG","role":"commercial","secteur":"REGION CENTRE","fonction":"Cash van (hors glaces)","actif":true},{"id":"p_cv_maguette","nom":"Maguette Mbaye","role":"commercial","secteur":"REGION CENTRE","fonction":"Cash van (hors glaces)","actif":true},{"id":"p_cv_valdiodo","nom":"Valdiodo","role":"commercial","secteur":"REGION CENTRE ET SUD EST","fonction":"Cash van (hors glaces)","actif":true},{"id":"p_said","nom":"Said Ben Hadj","role":"superviseur","equipe":["p_alioune","p_vieux","p_cv_almamy","p_cv_maad","p_cv_alytoure"],"actif":true},{"id":"p_maguette","nom":"Maguette Niang","role":"superviseur","equipe":["p_amadou","p_iba","p_cv_ibrahima","p_cv_abdoulaziz","p_cv_acg_d4"],"actif":true},{"id":"p_famara","nom":"Famara Badji","role":"superviseur","equipe":["p_yaya","p_tidiane","p_medoune","p_demba_an","p_demba_ane","p_bamba","p_cv_abdel","p_cv_acg_rc","p_cv_maguette","p_cv_valdiodo"],"actif":true},{"id":"p_adv","nom":"Service ADV","role":"adv","actif":true},{"id":"p_direction","nom":"Direction Commerciale","role":"direction","actif":true}],"produits":[{"id":"cat1","nom":"PRODUIT CHARCUTERIE"},{"id":"cat2","nom":"PRODUIT GLACE"},{"id":"cat3","nom":"PRODUIT YAOURT"},{"id":"cat4","nom":"PRODUIT SUPERETTE"}],"clients":[{"id":"c1","code":"CLTDIV6603","nom":"Boutique Baobab","secteur":"DAKAR 1","zone":"DAKAR PLATEAU","adresse":"DAKAR PLATEAU, pres du marche","telephone":"77 381 41 38","aFrigo":true,"commercialId":"p_alioune","joursVisite":["Lundi","Vendredi"],"nombreVisites":2,"objectifMensuel":150000,"statut":"actif","dateCreation":"2026-01-15","lat":14.69258,"lng":-17.481},{"id":"c2","code":"CLTDIV6606","nom":"Alimentation Etoile","secteur":"DAKAR 1","zone":"REUBEUSS","adresse":"REUBEUSS, pres du marche","telephone":"77 195 37 39","aFrigo":true,"commercialId":"p_alioune","joursVisite":["Lundi","Vendredi"],"nombreVisites":2,"objectifMensuel":200000,"statut":"actif","dateCreation":"2026-01-15","lat":14.69062,"lng":-17.48073},{"id":"c3","code":"CLTDIV6609","nom":"Superette Sahel","secteur":"DAKAR 1","zone":"MEDINA","adresse":"MEDINA, pres du marche","telephone":"77 529 38 67","aFrigo":false,"commercialId":"p_alioune","joursVisite":["Lundi","Mardi"],"nombreVisites":2,"objectifMensuel":400000,"statut":"actif","dateCreation":"2026-01-15","lat":14.69564,"lng":-17.45395},{"id":"c4","code":"CLTDIV6612","nom":"Kiosque Teranga","secteur":"DAKAR 1","zone":"FASS","adresse":"FASS, pres du marche","telephone":"77 320 53 23","aFrigo":true,"commercialId":"p_alioune","joursVisite":["Lundi","Mercredi"],"nombreVisites":2,"objectifMensuel":250000,"statut":"actif","dateCreation":"2026-01-15","lat":14.6839,"lng":-17.47089},{"id":"c5","code":"CLTDIV6615","nom":"Epicerie Jamm","secteur":"DAKAR 1","zone":null,"adresse":"","telephone":null,"aFrigo":false,"commercialId":"p_alioune","joursVisite":[],"nombreVisites":null,"objectifMensuel":150000,"statut":"actif","dateCreation":"2026-08-20","lat":14.69115,"lng":-17.44971},{"id":"c6","code":"CLTDIV6618","nom":"Depot Soleil","secteur":"DAKAR 2","zone":"PATTE D'OIE","adresse":"PATTE D'OIE, pres du marche","telephone":"77 487 20 80","aFrigo":true,"commercialId":"p_vieux","joursVisite":["Samedi","Vendredi"],"nombreVisites":2,"objectifMensuel":250000,"statut":"actif","dateCreation":"2026-01-15","lat":14.75219,"lng":-17.43655},{"id":"c7","code":"CLTDIV6621","nom":"Bar Horizon","secteur":"DAKAR 2","zone":"PARCELLES ASSAINIES DE 01 A 26","adresse":"PARCELLES ASSAINIES DE 01 A 26, pres du marche","telephone":"77 146 94 39","aFrigo":false,"commercialId":"p_vieux","joursVisite":["Lundi","Mardi"],"nombreVisites":2,"objectifMensuel":150000,"statut":"actif","dateCreation":"2026-01-15","lat":14.74609,"lng":-17.42982},{"id":"c8","code":"CLTDIV6624","nom":"Boutique Ocean","secteur":"DAKAR 2","zone":"NORD FOIRE","adresse":"NORD FOIRE, pres du marche","telephone":"77 954 56 30","aFrigo":true,"commercialId":"p_vieux","joursVisite":["Mardi","Mercredi"],"nombreVisites":2,"objectifMensuel":400000,"statut":"actif","dateCreation":"2026-01-15","lat":14.73821,"lng":-17.43986},{"id":"c9","code":"CLTDIV6627","nom":"Alimentation Palmier","secteur":"DAKAR 2","zone":"DIAMALAYE","adresse":"DIAMALAYE, pres du marche","telephone":"77 723 91 31","aFrigo":true,"commercialId":"p_vieux","joursVisite":["Mardi","Samedi"],"nombreVisites":2,"objectifMensuel":300000,"statut":"actif","dateCreation":"2026-01-15","lat":14.76047,"lng":-17.43208},{"id":"c10","code":"CLTDIV6630","nom":"Superette Lumiere","secteur":"DAKAR 2","zone":null,"adresse":"","telephone":null,"aFrigo":false,"commercialId":"p_vieux","joursVisite":[],"nombreVisites":null,"objectifMensuel":150000,"statut":"actif","dateCreation":"2026-08-20","lat":14.73818,"lng":-17.41842},{"id":"c11","code":"CLTDIV6633","nom":"Kiosque Diallo","secteur":"DAKAR 3","zone":"PIKINE","adresse":"PIKINE, pres du marche","telephone":"77 801 51 17","aFrigo":true,"commercialId":"p_amadou","joursVisite":["Lundi","Mercredi"],"nombreVisites":2,"objectifMensuel":300000,"statut":"actif","dateCreation":"2026-01-15","lat":14.7616,"lng":-17.38772},{"id":"c12","code":"CLTDIV6636","nom":"Epicerie Ndiaye","secteur":"DAKAR 3","zone":"THIAROYE","adresse":"THIAROYE, pres du marche","telephone":"77 680 50 37","aFrigo":false,"commercialId":"p_amadou","joursVisite":["Jeudi","Samedi"],"nombreVisites":2,"objectifMensuel":200000,"statut":"actif","dateCreation":"2026-01-15","lat":14.74671,"lng":-17.40156},{"id":"c13","code":"CLTDIV6639","nom":"Depot Sow","secteur":"DAKAR 3","zone":"DIAMAGUENE","adresse":"DIAMAGUENE, pres du marche","telephone":"77 674 78 43","aFrigo":false,"commercialId":"p_amadou","joursVisite":["Jeudi","Vendredi"],"nombreVisites":2,"objectifMensuel":300000,"statut":"actif","dateCreation":"2026-01-15","lat":14.7466,"lng":-17.40013},{"id":"c14","code":"CLTDIV6642","nom":"Bar Fall","secteur":"DAKAR 3","zone":"YEUMBEUL NORD","adresse":"YEUMBEUL NORD, pres du marche","telephone":"77 241 75 73","aFrigo":true,"commercialId":"p_amadou","joursVisite":["Lundi","Samedi"],"nombreVisites":2,"objectifMensuel":200000,"statut":"actif","dateCreation":"2026-01-15","lat":14.75048,"lng":-17.37011},{"id":"c15","code":"CLTDIV6645","nom":"Boutique Ba","secteur":"DAKAR 3","zone":null,"adresse":"","telephone":null,"aFrigo":false,"commercialId":"p_amadou","joursVisite":[],"nombreVisites":null,"objectifMensuel":150000,"statut":"actif","dateCreation":"2026-08-20","lat":14.7611,"lng":-17.37832},{"id":"c16","code":"CLTDIV6648","nom":"Alimentation Diop","secteur":"DAKAR 4","zone":"ZONE INDUSTRIELLE","adresse":"ZONE INDUSTRIELLE, pres du marche","telephone":"77 490 86 69","aFrigo":true,"commercialId":"p_iba","joursVisite":["Vendredi","Lundi"],"nombreVisites":2,"objectifMensuel":400000,"statut":"actif","dateCreation":"2026-01-15","lat":14.72189,"lng":-17.32746},{"id":"c17","code":"CLTDIV6651","nom":"Superette Kane","secteur":"DAKAR 4","zone":"HANN MARINAS","adresse":"HANN MARINAS, pres du marche","telephone":"77 649 44 92","aFrigo":true,"commercialId":"p_iba","joursVisite":["Mercredi","Jeudi"],"nombreVisites":2,"objectifMensuel":200000,"statut":"actif","dateCreation":"2026-01-15","lat":14.73383,"lng":-17.30273},{"id":"c18","code":"CLTDIV6654","nom":"Kiosque Gueye","secteur":"DAKAR 4","zone":"MARISTES","adresse":"MARISTES, pres du marche","telephone":"77 996 43 74","aFrigo":false,"commercialId":"p_iba","joursVisite":["Vendredi","Lundi"],"nombreVisites":2,"objectifMensuel":400000,"statut":"actif","dateCreation":"2026-01-15","lat":14.72315,"lng":-17.29185},{"id":"c19","code":"CLTDIV6657","nom":"Epicerie Sy","secteur":"DAKAR 4","zone":"YARAKH","adresse":"YARAKH, pres du marche","telephone":"77 723 35 29","aFrigo":true,"commercialId":"p_iba","joursVisite":["Mardi","Vendredi"],"nombreVisites":2,"objectifMensuel":350000,"statut":"actif","dateCreation":"2026-01-15","lat":14.71694,"lng":-17.30444},{"id":"c20","code":"CLTDIV6660","nom":"Depot Cisse","secteur":"DAKAR 4","zone":null,"adresse":"","telephone":null,"aFrigo":false,"commercialId":"p_iba","joursVisite":[],"nombreVisites":null,"objectifMensuel":150000,"statut":"actif","dateCreation":"2026-08-20","lat":14.74174,"lng":-17.30604},{"id":"c21","code":"CLTDIV6663","nom":"Bar Baobab","secteur":"REGION CENTRE","zone":"THIES","adresse":"THIES, pres du marche","telephone":"77 471 49 40","aFrigo":true,"commercialId":"p_yaya","joursVisite":["Vendredi","Lundi"],"nombreVisites":2,"objectifMensuel":150000,"statut":"actif","dateCreation":"2026-01-15","lat":14.79054,"lng":-16.95143},{"id":"c22","code":"CLTDIV6666","nom":"Boutique Etoile","secteur":"REGION CENTRE","zone":"TIVAVOUANE","adresse":"TIVAVOUANE, pres du marche","telephone":"77 878 78 26","aFrigo":true,"commercialId":"p_yaya","joursVisite":["Jeudi","Vendredi"],"nombreVisites":2,"objectifMensuel":200000,"statut":"actif","dateCreation":"2026-01-15","lat":14.80028,"lng":-16.92326},{"id":"c23","code":"CLTDIV6669","nom":"Alimentation Sahel","secteur":"REGION CENTRE","zone":"MBORO","adresse":"MBORO, pres du marche","telephone":"77 533 37 79","aFrigo":false,"commercialId":"p_yaya","joursVisite":["Samedi","Mardi"],"nombreVisites":2,"objectifMensuel":400000,"statut":"actif","dateCreation":"2026-01-15","lat":14.7816,"lng":-16.921},{"id":"c24","code":"CLTDIV6672","nom":"Superette Teranga","secteur":"REGION CENTRE","zone":null,"adresse":"","telephone":null,"aFrigo":false,"commercialId":"p_yaya","joursVisite":[],"nombreVisites":null,"objectifMensuel":150000,"statut":"actif","dateCreation":"2026-08-20","lat":14.78347,"lng":-16.91609},{"id":"c25","code":"CLTDIV6689","nom":"Abdou Kane Sangalkam ACG","secteur":"DAKAR 1","zone":null,"adresse":"","telephone":null,"aFrigo":false,"commercialId":"p_alioune","joursVisite":[],"nombreVisites":null,"objectifMensuel":150000,"statut":"actif","dateCreation":"2026-08-25","lat":14.693,"lng":-17.46448},{"id":"c26","code":"CLTDIV5704","nom":"Abdou Rahman Diallo","secteur":"DAKAR 1","zone":null,"adresse":"","telephone":null,"aFrigo":false,"commercialId":"p_alioune","joursVisite":[],"nombreVisites":null,"objectifMensuel":150000,"statut":"actif","dateCreation":"2026-08-25","lat":14.6877,"lng":-17.47716},{"id":"c27","code":null,"nom":"Depot Horizon","secteur":"DAKAR 1","zone":"HLM OUAGOU NIAYES","adresse":"HLM OUAGOU NIAYES, repere local","telephone":"77 667 39 85","aFrigo":true,"commercialId":"p_alioune","joursVisite":[],"nombreVisites":null,"objectifMensuel":150000,"statut":"prospect","dateCreation":"2026-08-29","origineProspection":"terrain","lat":14.66956,"lng":-17.48116},{"id":"c28","code":null,"nom":"Bar Ocean","secteur":"DAKAR 2","zone":"PARCELLES ASSAINIES DE 01 A 26","adresse":"PARCELLES ASSAINIES DE 01 A 26, repere local","telephone":"77 169 14 52","aFrigo":true,"commercialId":"p_vieux","joursVisite":[],"nombreVisites":null,"objectifMensuel":150000,"statut":"prospect","dateCreation":"2026-08-29","origineProspection":"superviseur","lat":14.75131,"lng":-17.45565,"superviseurId":"p_said"},{"id":"c29","code":null,"nom":"Boutique Palmier","secteur":"DAKAR 4","zone":"SICAP MBAO","adresse":"SICAP MBAO, repere local","telephone":"77 652 26 83","aFrigo":false,"commercialId":"p_iba","joursVisite":[],"nombreVisites":null,"objectifMensuel":150000,"statut":"prospect","dateCreation":"2026-08-29","origineProspection":"superviseur","lat":14.71614,"lng":-17.31058,"superviseurId":"p_said"},{"id":"c30","code":null,"nom":"Alimentation Lumiere","secteur":"REGION CENTRE","zone":"KAYAR","adresse":"KAYAR, repere local","telephone":"77 294 22 22","aFrigo":false,"commercialId":"p_yaya","joursVisite":[],"nombreVisites":null,"objectifMensuel":150000,"statut":"prospect","dateCreation":"2026-08-29","origineProspection":"terrain","lat":14.80238,"lng":-16.9236},{"id":"c31","code":null,"nom":"Superette Diallo","secteur":"DAKAR 3","zone":"CITE ASECNA","adresse":"CITE ASECNA, repere local","telephone":"77 846 16 96","aFrigo":true,"commercialId":"p_amadou","joursVisite":[],"nombreVisites":null,"objectifMensuel":150000,"statut":"a_valider","dateCreation":"2026-08-18","venteEnAttenteDate":"2026-09-02","origineProspection":"terrain","lat":14.75294,"lng":-17.39132},{"id":"c32","code":null,"nom":"Kiosque Ndiaye","secteur":"DAKAR 1","zone":"MERMOZ","adresse":"MERMOZ, repere local","telephone":"77 512 53 23","aFrigo":true,"commercialId":"p_alioune","joursVisite":[],"nombreVisites":null,"objectifMensuel":150000,"statut":"a_valider","dateCreation":"2026-08-18","venteEnAttenteDate":"2026-09-03","origineProspection":"superviseur","lat":14.70637,"lng":-17.47806,"superviseurId":"p_said"}],"visites":[{"id":"v1","clientId":"c1","commercialId":"p_alioune","date":"2026-08-23","timestamp":"2026-08-23T09:18:00Z","gps":{"lat":14.69235,"lng":-17.48166,"distanceM":122},"statut":"vendu","produitsVendus":["cat1"],"montantTotal":25000,"raisonNonAchat":null},{"id":"v2","clientId":"c1","commercialId":"p_alioune","date":"2026-07-31","timestamp":"2026-07-31T09:15:00Z","gps":{"lat":14.69386,"lng":-17.47995,"distanceM":11},"statut":"vendu","produitsVendus":["cat4"],"montantTotal":25000,"raisonNonAchat":null},{"id":"v3","clientId":"c1","commercialId":"p_alioune","date":"2026-08-05","timestamp":"2026-08-05T09:13:00Z","gps":{"lat":14.69157,"lng":-17.48249,"distanceM":110},"statut":"vendu","produitsVendus":["cat3","cat2"],"montantTotal":15000,"raisonNonAchat":null},{"id":"v4","clientId":"c1","commercialId":"p_alioune","date":"2026-08-08","timestamp":"2026-08-08T09:19:00Z","gps":{"lat":14.69165,"lng":-17.48185,"distanceM":132},"statut":"vendu","produitsVendus":["cat1"],"montantTotal":18000,"raisonNonAchat":null},{"id":"v5","clientId":"c2","commercialId":"p_alioune","date":"2026-09-01","timestamp":"2026-09-01T09:43:00Z","gps":{"lat":14.68959,"lng":-17.47935,"distanceM":136},"statut":"vendu","produitsVendus":["cat2"],"montantTotal":7500,"raisonNonAchat":null},{"id":"v6","clientId":"c2","commercialId":"p_alioune","date":"2026-07-28","timestamp":"2026-07-28T09:35:00Z","gps":{"lat":14.68948,"lng":-17.47956,"distanceM":68},"statut":"vendu","produitsVendus":["cat1"],"montantTotal":7500,"raisonNonAchat":null},{"id":"v7","clientId":"c2","commercialId":"p_alioune","date":"2026-08-09","timestamp":"2026-08-09T09:26:00Z","gps":{"lat":14.68973,"lng":-17.48008,"distanceM":88},"statut":"vendu","produitsVendus":["cat3"],"montantTotal":22000,"raisonNonAchat":null},{"id":"v8","clientId":"c3","commercialId":"p_alioune","date":"2026-07-24","timestamp":"2026-07-24T09:30:00Z","gps":{"lat":14.69693,"lng":-17.45264,"distanceM":125},"statut":"vendu","produitsVendus":["cat4"],"montantTotal":7500,"raisonNonAchat":null},{"id":"v9","clientId":"c3","commercialId":"p_alioune","date":"2026-08-31","timestamp":"2026-08-31T09:26:00Z","gps":{"lat":14.69454,"lng":-17.4544,"distanceM":137},"statut":"vendu","produitsVendus":["cat2"],"montantTotal":18000,"raisonNonAchat":null},{"id":"v10","clientId":"c3","commercialId":"p_alioune","date":"2026-08-17","timestamp":"2026-08-17T09:49:00Z","gps":{"lat":14.69709,"lng":-17.45303,"distanceM":85},"statut":"vendu","produitsVendus":["cat1","cat3","cat2"],"montantTotal":7500,"raisonNonAchat":null},{"id":"v11","clientId":"c3","commercialId":"p_alioune","date":"2026-08-27","timestamp":"2026-08-27T09:45:00Z","gps":{"lat":14.69461,"lng":-17.4546,"distanceM":35},"statut":"vendu","produitsVendus":["cat3"],"montantTotal":12500,"raisonNonAchat":null},{"id":"v12","clientId":"c4","commercialId":"p_alioune","date":"2026-08-03","timestamp":"2026-08-03T09:15:00Z","gps":{"lat":14.6843,"lng":-17.4699,"distanceM":21},"statut":"vendu","produitsVendus":["cat1"],"montantTotal":18000,"raisonNonAchat":null},{"id":"v13","clientId":"c4","commercialId":"p_alioune","date":"2026-08-27","timestamp":"2026-08-27T09:20:00Z","gps":{"lat":14.68462,"lng":-17.47073,"distanceM":75},"statut":"vendu","produitsVendus":["cat1","cat4"],"montantTotal":7500,"raisonNonAchat":null},{"id":"v14","clientId":"c4","commercialId":"p_alioune","date":"2026-07-22","timestamp":"2026-07-22T09:33:00Z","gps":{"lat":14.68415,"lng":-17.47195,"distanceM":17},"statut":"non_vendu","produitsVendus":[],"montantTotal":0,"raisonNonAchat":"Rupture de stock chez le client"},{"id":"v15","clientId":"c4","commercialId":"p_alioune","date":"2026-09-02","timestamp":"2026-09-02T09:32:00Z","gps":{"lat":14.68303,"lng":-17.47164,"distanceM":18},"statut":"vendu","produitsVendus":["cat3"],"montantTotal":30000,"raisonNonAchat":null},{"id":"v16","clientId":"c4","commercialId":"p_alioune","date":"2026-08-09","timestamp":"2026-08-09T09:25:00Z","gps":{"lat":14.68499,"lng":-17.46946,"distanceM":47},"statut":"non_vendu","produitsVendus":[],"montantTotal":0,"raisonNonAchat":"Rupture de stock chez le client"},{"id":"v17","clientId":"c5","commercialId":"p_alioune","date":"2026-09-03","timestamp":"2026-09-03T09:36:00Z","gps":{"lat":14.69206,"lng":-17.44862,"distanceM":93},"statut":"vendu","produitsVendus":["cat3"],"montantTotal":10000,"raisonNonAchat":null},{"id":"v18","clientId":"c5","commercialId":"p_alioune","date":"2026-07-22","timestamp":"2026-07-22T09:40:00Z","gps":{"lat":14.69032,"lng":-17.44876,"distanceM":17},"statut":"vendu","produitsVendus":["cat3","cat2"],"montantTotal":12500,"raisonNonAchat":null},{"id":"v19","clientId":"c5","commercialId":"p_alioune","date":"2026-08-21","timestamp":"2026-08-21T09:35:00Z","gps":{"lat":14.69063,"lng":-17.44862,"distanceM":57},"statut":"vendu","produitsVendus":["cat3","cat4"],"montantTotal":30000,"raisonNonAchat":null},{"id":"v20","clientId":"c5","commercialId":"p_alioune","date":"2026-08-10","timestamp":"2026-08-10T09:11:00Z","gps":{"lat":14.69,"lng":-17.4483,"distanceM":92},"statut":"vendu","produitsVendus":["cat3"],"montantTotal":5000,"raisonNonAchat":null},{"id":"v21","clientId":"c5","commercialId":"p_alioune","date":"2026-08-29","timestamp":"2026-08-29T09:30:00Z","gps":{"lat":14.69096,"lng":-17.44826,"distanceM":96},"statut":"vendu","produitsVendus":["cat4"],"montantTotal":12500,"raisonNonAchat":null},{"id":"v22","clientId":"c5","commercialId":"p_alioune","date":"2026-08-19","timestamp":"2026-08-19T09:10:00Z","gps":{"lat":14.69121,"lng":-17.44879,"distanceM":119},"statut":"vendu","produitsVendus":["cat2","cat4","cat3"],"montantTotal":7500,"raisonNonAchat":null},{"id":"v23","clientId":"c6","commercialId":"p_vieux","date":"2026-07-27","timestamp":"2026-07-27T09:29:00Z","gps":{"lat":14.75221,"lng":-17.43605,"distanceM":39},"statut":"vendu","produitsVendus":["cat4","cat3"],"montantTotal":15000,"raisonNonAchat":null},{"id":"v24","clientId":"c6","commercialId":"p_vieux","date":"2026-07-31","timestamp":"2026-07-31T09:52:00Z","gps":{"lat":14.75351,"lng":-17.43602,"distanceM":115},"statut":"vendu","produitsVendus":["cat3"],"montantTotal":22000,"raisonNonAchat":null},{"id":"v25","clientId":"c6","commercialId":"p_vieux","date":"2026-09-04","timestamp":"2026-09-04T09:37:00Z","gps":{"lat":14.75305,"lng":-17.43623,"distanceM":61},"statut":"vendu","produitsVendus":["cat4","cat2"],"montantTotal":25000,"raisonNonAchat":null},{"id":"v26","clientId":"c6","commercialId":"p_vieux","date":"2026-07-23","timestamp":"2026-07-23T09:20:00Z","gps":{"lat":14.75267,"lng":-17.4372,"distanceM":129},"statut":"vendu","produitsVendus":["cat3","cat1","cat4"],"montantTotal":15000,"raisonNonAchat":null},{"id":"v27","clientId":"c6","commercialId":"p_vieux","date":"2026-08-21","timestamp":"2026-08-21T09:11:00Z","gps":{"lat":14.75083,"lng":-17.4351,"distanceM":45},"statut":"non_vendu","produitsVendus":[],"montantTotal":0,"raisonNonAchat":"Probleme de paiement / credit"},{"id":"v28","clientId":"c7","commercialId":"p_vieux","date":"2026-08-06","timestamp":"2026-08-06T09:55:00Z","gps":{"lat":14.74668,"lng":-17.42984,"distanceM":57},"statut":"vendu","produitsVendus":["cat2"],"montantTotal":5000,"raisonNonAchat":null},{"id":"v29","clientId":"c7","commercialId":"p_vieux","date":"2026-08-29","timestamp":"2026-08-29T09:21:00Z","gps":{"lat":14.747,"lng":-17.42923,"distanceM":64},"statut":"non_vendu","produitsVendus":[],"montantTotal":0,"raisonNonAchat":"Client ferme / absent"},{"id":"v30","clientId":"c7","commercialId":"p_vieux","date":"2026-09-01","timestamp":"2026-09-01T09:39:00Z","gps":{"lat":14.74499,"lng":-17.42993,"distanceM":39},"statut":"vendu","produitsVendus":["cat3","cat2","cat4"],"montantTotal":30000,"raisonNonAchat":null},{"id":"v31","clientId":"c8","commercialId":"p_vieux","date":"2026-08-25","timestamp":"2026-08-25T09:38:00Z","gps":{"lat":14.73749,"lng":-17.44062,"distanceM":129},"statut":"non_vendu","produitsVendus":[],"montantTotal":0,"raisonNonAchat":"Pas de besoin actuellement"},{"id":"v32","clientId":"c8","commercialId":"p_vieux","date":"2026-08-02","timestamp":"2026-08-02T09:27:00Z","gps":{"lat":14.73803,"lng":-17.43922,"distanceM":69},"statut":"vendu","produitsVendus":["cat3"],"montantTotal":18000,"raisonNonAchat":null},{"id":"v33","clientId":"c8","commercialId":"p_vieux","date":"2026-08-15","timestamp":"2026-08-15T09:18:00Z","gps":{"lat":14.73716,"lng":-17.44021,"distanceM":28},"statut":"non_vendu","produitsVendus":[],"montantTotal":0,"raisonNonAchat":"Rupture de stock chez le client"},{"id":"v34","clientId":"c8","commercialId":"p_vieux","date":"2026-08-22","timestamp":"2026-08-22T09:31:00Z","gps":{"lat":14.73834,"lng":-17.44011,"distanceM":112},"statut":"vendu","produitsVendus":["cat4"],"montantTotal":22000,"raisonNonAchat":null},{"id":"v35","clientId":"c8","commercialId":"p_vieux","date":"2026-07-29","timestamp":"2026-07-29T09:46:00Z","gps":{"lat":14.73785,"lng":-17.44134,"distanceM":13},"statut":"non_vendu","produitsVendus":[],"montantTotal":0,"raisonNonAchat":"Pas de besoin actuellement"},{"id":"v36","clientId":"c8","commercialId":"p_vieux","date":"2026-08-16","timestamp":"2026-08-16T09:44:00Z","gps":{"lat":14.73895,"lng":-17.43972,"distanceM":115},"statut":"non_vendu","produitsVendus":[],"montantTotal":0,"raisonNonAchat":"Probleme de paiement / credit"},{"id":"v37","clientId":"c9","commercialId":"p_vieux","date":"2026-08-04","timestamp":"2026-08-04T09:41:00Z","gps":{"lat":14.75906,"lng":-17.43257,"distanceM":119},"statut":"vendu","produitsVendus":["cat4","cat3","cat1"],"montantTotal":25000,"raisonNonAchat":null},{"id":"v38","clientId":"c9","commercialId":"p_vieux","date":"2026-08-27","timestamp":"2026-08-27T09:35:00Z","gps":{"lat":14.76075,"lng":-17.43159,"distanceM":14},"statut":"non_vendu","produitsVendus":[],"montantTotal":0,"raisonNonAchat":"Prix juge trop eleve"},{"id":"v39","clientId":"c9","commercialId":"p_vieux","date":"2026-07-25","timestamp":"2026-07-25T09:21:00Z","gps":{"lat":14.75912,"lng":-17.43244,"distanceM":126},"statut":"vendu","produitsVendus":["cat4"],"montantTotal":18000,"raisonNonAchat":null},{"id":"v40","clientId":"c9","commercialId":"p_vieux","date":"2026-08-14","timestamp":"2026-08-14T09:27:00Z","gps":{"lat":14.76123,"lng":-17.43108,"distanceM":105},"statut":"non_vendu","produitsVendus":[],"montantTotal":0,"raisonNonAchat":"Pas de besoin actuellement"},{"id":"v41","clientId":"c10","commercialId":"p_vieux","date":"2026-08-05","timestamp":"2026-08-05T09:32:00Z","gps":{"lat":14.73735,"lng":-17.41971,"distanceM":21},"statut":"vendu","produitsVendus":["cat1","cat4","cat3"],"montantTotal":12500,"raisonNonAchat":null},{"id":"v42","clientId":"c10","commercialId":"p_vieux","date":"2026-09-03","timestamp":"2026-09-03T09:18:00Z","gps":{"lat":14.7381,"lng":-17.41958,"distanceM":69},"statut":"vendu","produitsVendus":["cat4"],"montantTotal":15000,"raisonNonAchat":null},{"id":"v43","clientId":"c10","commercialId":"p_vieux","date":"2026-08-12","timestamp":"2026-08-12T09:20:00Z","gps":{"lat":14.73957,"lng":-17.4196,"distanceM":37},"statut":"vendu","produitsVendus":["cat3"],"montantTotal":22000,"raisonNonAchat":null},{"id":"v44","clientId":"c11","commercialId":"p_amadou","date":"2026-08-23","timestamp":"2026-08-23T09:16:00Z","gps":{"lat":14.76219,"lng":-17.38832,"distanceM":70},"statut":"vendu","produitsVendus":["cat1","cat3","cat4"],"montantTotal":18000,"raisonNonAchat":null},{"id":"v45","clientId":"c11","commercialId":"p_amadou","date":"2026-08-01","timestamp":"2026-08-01T09:14:00Z","gps":{"lat":14.76162,"lng":-17.3882,"distanceM":102},"statut":"vendu","produitsVendus":["cat4","cat1"],"montantTotal":22000,"raisonNonAchat":null},{"id":"v46","clientId":"c11","commercialId":"p_amadou","date":"2026-08-12","timestamp":"2026-08-12T09:55:00Z","gps":{"lat":14.76056,"lng":-17.38869,"distanceM":125},"statut":"vendu","produitsVendus":["cat3","cat4","cat2"],"montantTotal":25000,"raisonNonAchat":null},{"id":"v47","clientId":"c11","commercialId":"p_amadou","date":"2026-08-08","timestamp":"2026-08-08T09:30:00Z","gps":{"lat":14.76266,"lng":-17.38673,"distanceM":76},"statut":"non_vendu","produitsVendus":[],"montantTotal":0,"raisonNonAchat":"Prix juge trop eleve"},{"id":"v48","clientId":"c11","commercialId":"p_amadou","date":"2026-08-18","timestamp":"2026-08-18T09:39:00Z","gps":{"lat":14.76181,"lng":-17.38722,"distanceM":70},"statut":"non_vendu","produitsVendus":[],"montantTotal":0,"raisonNonAchat":"Pas de besoin actuellement"},{"id":"v49","clientId":"c11","commercialId":"p_amadou","date":"2026-09-03","timestamp":"2026-09-03T09:21:00Z","gps":{"lat":14.76156,"lng":-17.38816,"distanceM":91},"statut":"vendu","produitsVendus":["cat3","cat2"],"montantTotal":15000,"raisonNonAchat":null},{"id":"v50","clientId":"c12","commercialId":"p_amadou","date":"2026-08-02","timestamp":"2026-08-02T09:25:00Z","gps":{"lat":14.74737,"lng":-17.40159,"distanceM":29},"statut":"non_vendu","produitsVendus":[],"montantTotal":0,"raisonNonAchat":"Rupture de stock chez le client"},{"id":"v51","clientId":"c12","commercialId":"p_amadou","date":"2026-07-22","timestamp":"2026-07-22T09:38:00Z","gps":{"lat":14.74759,"lng":-17.40278,"distanceM":133},"statut":"vendu","produitsVendus":["cat4"],"montantTotal":12500,"raisonNonAchat":null},{"id":"v52","clientId":"c12","commercialId":"p_amadou","date":"2026-08-16","timestamp":"2026-08-16T09:40:00Z","gps":{"lat":14.74687,"lng":-17.40203,"distanceM":102},"statut":"vendu","produitsVendus":["cat3","cat2","cat4"],"montantTotal":15000,"raisonNonAchat":null},{"id":"v53","clientId":"c13","commercialId":"p_amadou","date":"2026-08-19","timestamp":"2026-08-19T09:30:00Z","gps":{"lat":14.74546,"lng":-17.40002,"distanceM":57},"statut":"vendu","produitsVendus":["cat2","cat1","cat3"],"montantTotal":25000,"raisonNonAchat":null},{"id":"v54","clientId":"c13","commercialId":"p_amadou","date":"2026-08-18","timestamp":"2026-08-18T09:16:00Z","gps":{"lat":14.7476,"lng":-17.40074,"distanceM":80},"statut":"non_vendu","produitsVendus":[],"montantTotal":0,"raisonNonAchat":"Pas de besoin actuellement"},{"id":"v55","clientId":"c13","commercialId":"p_amadou","date":"2026-08-24","timestamp":"2026-08-24T09:27:00Z","gps":{"lat":14.74524,"lng":-17.40147,"distanceM":40},"statut":"vendu","produitsVendus":["cat2","cat3"],"montantTotal":25000,"raisonNonAchat":null},{"id":"v56","clientId":"c13","commercialId":"p_amadou","date":"2026-08-29","timestamp":"2026-08-29T09:40:00Z","gps":{"lat":14.74654,"lng":-17.40061,"distanceM":80},"statut":"non_vendu","produitsVendus":[],"montantTotal":0,"raisonNonAchat":"Prix juge trop eleve"},{"id":"v57","clientId":"c13","commercialId":"p_amadou","date":"2026-08-05","timestamp":"2026-08-05T09:35:00Z","gps":{"lat":14.74658,"lng":-17.3999,"distanceM":24},"statut":"vendu","produitsVendus":["cat1","cat4","cat3"],"montantTotal":15000,"raisonNonAchat":null},{"id":"v58","clientId":"c14","commercialId":"p_amadou","date":"2026-08-20","timestamp":"2026-08-20T09:48:00Z","gps":{"lat":14.75077,"lng":-17.36975,"distanceM":114},"statut":"vendu","produitsVendus":["cat4","cat2","cat3"],"montantTotal":15000,"raisonNonAchat":null},{"id":"v59","clientId":"c14","commercialId":"p_amadou","date":"2026-07-29","timestamp":"2026-07-29T09:46:00Z","gps":{"lat":14.75084,"lng":-17.36978,"distanceM":86},"statut":"non_vendu","produitsVendus":[],"montantTotal":0,"raisonNonAchat":"Prix juge trop eleve"},{"id":"v60","clientId":"c14","commercialId":"p_amadou","date":"2026-08-22","timestamp":"2026-08-22T09:52:00Z","gps":{"lat":14.74922,"lng":-17.37089,"distanceM":75},"statut":"vendu","produitsVendus":["cat1","cat4","cat3"],"montantTotal":22000,"raisonNonAchat":null},{"id":"v61","clientId":"c15","commercialId":"p_amadou","date":"2026-07-22","timestamp":"2026-07-22T09:12:00Z","gps":{"lat":14.76029,"lng":-17.3777,"distanceM":82},"statut":"vendu","produitsVendus":["cat4","cat1","cat3"],"montantTotal":15000,"raisonNonAchat":null},{"id":"v62","clientId":"c15","commercialId":"p_amadou","date":"2026-07-26","timestamp":"2026-07-26T09:37:00Z","gps":{"lat":14.75994,"lng":-17.37915,"distanceM":58},"statut":"vendu","produitsVendus":["cat3"],"montantTotal":10000,"raisonNonAchat":null},{"id":"v63","clientId":"c15","commercialId":"p_amadou","date":"2026-08-31","timestamp":"2026-08-31T09:48:00Z","gps":{"lat":14.76185,"lng":-17.37811,"distanceM":86},"statut":"vendu","produitsVendus":["cat4","cat1"],"montantTotal":25000,"raisonNonAchat":null},{"id":"v64","clientId":"c15","commercialId":"p_amadou","date":"2026-08-16","timestamp":"2026-08-16T09:42:00Z","gps":{"lat":14.76122,"lng":-17.37851,"distanceM":77},"statut":"vendu","produitsVendus":["cat1","cat2","cat3"],"montantTotal":15000,"raisonNonAchat":null},{"id":"v65","clientId":"c15","commercialId":"p_amadou","date":"2026-09-03","timestamp":"2026-09-03T09:53:00Z","gps":{"lat":14.76206,"lng":-17.37809,"distanceM":13},"statut":"vendu","produitsVendus":["cat4"],"montantTotal":30000,"raisonNonAchat":null},{"id":"v66","clientId":"c15","commercialId":"p_amadou","date":"2026-07-25","timestamp":"2026-07-25T09:21:00Z","gps":{"lat":14.76259,"lng":-17.37851,"distanceM":79},"statut":"vendu","produitsVendus":["cat1","cat2"],"montantTotal":18000,"raisonNonAchat":null},{"id":"v67","clientId":"c16","commercialId":"p_iba","date":"2026-08-14","timestamp":"2026-08-14T09:20:00Z","gps":{"lat":14.72138,"lng":-17.32688,"distanceM":34},"statut":"vendu","produitsVendus":["cat4","cat3"],"montantTotal":5000,"raisonNonAchat":null},{"id":"v68","clientId":"c16","commercialId":"p_iba","date":"2026-08-06","timestamp":"2026-08-06T09:30:00Z","gps":{"lat":14.72074,"lng":-17.32664,"distanceM":72},"statut":"vendu","produitsVendus":["cat1","cat3","cat2"],"montantTotal":22000,"raisonNonAchat":null},{"id":"v69","clientId":"c16","commercialId":"p_iba","date":"2026-09-01","timestamp":"2026-09-01T09:49:00Z","gps":{"lat":14.72266,"lng":-17.32708,"distanceM":100},"statut":"vendu","produitsVendus":["cat2"],"montantTotal":15000,"raisonNonAchat":null},{"id":"v70","clientId":"c16","commercialId":"p_iba","date":"2026-07-31","timestamp":"2026-07-31T09:38:00Z","gps":{"lat":14.72303,"lng":-17.32751,"distanceM":81},"statut":"vendu","produitsVendus":["cat2"],"montantTotal":10000,"raisonNonAchat":null},{"id":"v71","clientId":"c16","commercialId":"p_iba","date":"2026-08-16","timestamp":"2026-08-16T09:15:00Z","gps":{"lat":14.72106,"lng":-17.32644,"distanceM":112},"statut":"vendu","produitsVendus":["cat4"],"montantTotal":7500,"raisonNonAchat":null},{"id":"v72","clientId":"c16","commercialId":"p_iba","date":"2026-07-25","timestamp":"2026-07-25T09:55:00Z","gps":{"lat":14.72127,"lng":-17.32684,"distanceM":135},"statut":"non_vendu","produitsVendus":[],"montantTotal":0,"raisonNonAchat":"Client ferme / absent"},{"id":"v73","clientId":"c17","commercialId":"p_iba","date":"2026-08-05","timestamp":"2026-08-05T09:34:00Z","gps":{"lat":14.7329,"lng":-17.30243,"distanceM":45},"statut":"vendu","produitsVendus":["cat2","cat1","cat4"],"montantTotal":22000,"raisonNonAchat":null},{"id":"v74","clientId":"c17","commercialId":"p_iba","date":"2026-08-14","timestamp":"2026-08-14T09:27:00Z","gps":{"lat":14.73479,"lng":-17.30338,"distanceM":137},"statut":"non_vendu","produitsVendus":[],"montantTotal":0,"raisonNonAchat":"Pas de besoin actuellement"},{"id":"v75","clientId":"c17","commercialId":"p_iba","date":"2026-07-29","timestamp":"2026-07-29T09:19:00Z","gps":{"lat":14.73367,"lng":-17.30278,"distanceM":133},"statut":"vendu","produitsVendus":["cat4","cat2"],"montantTotal":18000,"raisonNonAchat":null},{"id":"v76","clientId":"c17","commercialId":"p_iba","date":"2026-08-23","timestamp":"2026-08-23T09:46:00Z","gps":{"lat":14.73348,"lng":-17.30166,"distanceM":69},"statut":"non_vendu","produitsVendus":[],"montantTotal":0,"raisonNonAchat":"Client ferme / absent"},{"id":"v77","clientId":"c17","commercialId":"p_iba","date":"2026-09-02","timestamp":"2026-09-02T09:55:00Z","gps":{"lat":14.73507,"lng":-17.30309,"distanceM":129},"statut":"vendu","produitsVendus":["cat2","cat4","cat1"],"montantTotal":10000,"raisonNonAchat":null},{"id":"v78","clientId":"c17","commercialId":"p_iba","date":"2026-08-03","timestamp":"2026-08-03T09:16:00Z","gps":{"lat":14.73495,"lng":-17.30291,"distanceM":92},"statut":"non_vendu","produitsVendus":[],"montantTotal":0,"raisonNonAchat":"Probleme de paiement / credit"},{"id":"v79","clientId":"c18","commercialId":"p_iba","date":"2026-09-04","timestamp":"2026-09-04T09:51:00Z","gps":{"lat":14.72456,"lng":-17.29313,"distanceM":112},"statut":"non_vendu","produitsVendus":[],"montantTotal":0,"raisonNonAchat":"Pas de besoin actuellement"},{"id":"v80","clientId":"c18","commercialId":"p_iba","date":"2026-08-14","timestamp":"2026-08-14T09:51:00Z","gps":{"lat":14.72189,"lng":-17.29236,"distanceM":109},"statut":"vendu","produitsVendus":["cat4","cat2","cat3"],"montantTotal":30000,"raisonNonAchat":null},{"id":"v81","clientId":"c18","commercialId":"p_iba","date":"2026-09-02","timestamp":"2026-09-02T09:50:00Z","gps":{"lat":14.7237,"lng":-17.29249,"distanceM":68},"statut":"vendu","produitsVendus":["cat1"],"montantTotal":22000,"raisonNonAchat":null},{"id":"v82","clientId":"c18","commercialId":"p_iba","date":"2026-08-29","timestamp":"2026-08-29T09:38:00Z","gps":{"lat":14.72215,"lng":-17.29245,"distanceM":33},"statut":"non_vendu","produitsVendus":[],"montantTotal":0,"raisonNonAchat":"Prix juge trop eleve"},{"id":"v83","clientId":"c18","commercialId":"p_iba","date":"2026-08-15","timestamp":"2026-08-15T09:32:00Z","gps":{"lat":14.72277,"lng":-17.29291,"distanceM":83},"statut":"non_vendu","produitsVendus":[],"montantTotal":0,"raisonNonAchat":"Probleme de paiement / credit"},{"id":"v84","clientId":"c18","commercialId":"p_iba","date":"2026-08-09","timestamp":"2026-08-09T09:20:00Z","gps":{"lat":14.72218,"lng":-17.29152,"distanceM":54},"statut":"vendu","produitsVendus":["cat2","cat4"],"montantTotal":10000,"raisonNonAchat":null},{"id":"v85","clientId":"c19","commercialId":"p_iba","date":"2026-08-06","timestamp":"2026-08-06T09:26:00Z","gps":{"lat":14.71744,"lng":-17.30324,"distanceM":125},"statut":"vendu","produitsVendus":["cat3","cat4"],"montantTotal":30000,"raisonNonAchat":null},{"id":"v86","clientId":"c19","commercialId":"p_iba","date":"2026-08-25","timestamp":"2026-08-25T09:47:00Z","gps":{"lat":14.71634,"lng":-17.30305,"distanceM":96},"statut":"vendu","produitsVendus":["cat3","cat2","cat4"],"montantTotal":12500,"raisonNonAchat":null},{"id":"v87","clientId":"c19","commercialId":"p_iba","date":"2026-08-11","timestamp":"2026-08-11T09:25:00Z","gps":{"lat":14.71658,"lng":-17.30486,"distanceM":35},"statut":"non_vendu","produitsVendus":[],"montantTotal":0,"raisonNonAchat":"Pas de besoin actuellement"},{"id":"v88","clientId":"c19","commercialId":"p_iba","date":"2026-07-22","timestamp":"2026-07-22T09:27:00Z","gps":{"lat":14.71546,"lng":-17.30334,"distanceM":109},"statut":"vendu","produitsVendus":["cat1","cat3","cat2"],"montantTotal":15000,"raisonNonAchat":null},{"id":"v89","clientId":"c20","commercialId":"p_iba","date":"2026-07-28","timestamp":"2026-07-28T09:50:00Z","gps":{"lat":14.74081,"lng":-17.30679,"distanceM":64},"statut":"non_vendu","produitsVendus":[],"montantTotal":0,"raisonNonAchat":"Rupture de stock chez le client"},{"id":"v90","clientId":"c20","commercialId":"p_iba","date":"2026-07-26","timestamp":"2026-07-26T09:29:00Z","gps":{"lat":14.74261,"lng":-17.30744,"distanceM":18},"statut":"vendu","produitsVendus":["cat2","cat1"],"montantTotal":15000,"raisonNonAchat":null},{"id":"v91","clientId":"c20","commercialId":"p_iba","date":"2026-08-15","timestamp":"2026-08-15T09:22:00Z","gps":{"lat":14.74064,"lng":-17.30592,"distanceM":52},"statut":"non_vendu","produitsVendus":[],"montantTotal":0,"raisonNonAchat":"Pas de besoin actuellement"},{"id":"v92","clientId":"c20","commercialId":"p_iba","date":"2026-08-02","timestamp":"2026-08-02T09:20:00Z","gps":{"lat":14.74101,"lng":-17.30507,"distanceM":77},"statut":"vendu","produitsVendus":["cat3","cat4"],"montantTotal":18000,"raisonNonAchat":null},{"id":"v93","clientId":"c21","commercialId":"p_yaya","date":"2026-08-06","timestamp":"2026-08-06T09:24:00Z","gps":{"lat":14.79162,"lng":-16.95076,"distanceM":44},"statut":"non_vendu","produitsVendus":[],"montantTotal":0,"raisonNonAchat":"Client ferme / absent"},{"id":"v94","clientId":"c21","commercialId":"p_yaya","date":"2026-07-31","timestamp":"2026-07-31T09:10:00Z","gps":{"lat":14.78983,"lng":-16.95256,"distanceM":109},"statut":"vendu","produitsVendus":["cat3","cat4"],"montantTotal":22000,"raisonNonAchat":null},{"id":"v95","clientId":"c21","commercialId":"p_yaya","date":"2026-07-26","timestamp":"2026-07-26T09:53:00Z","gps":{"lat":14.78974,"lng":-16.95285,"distanceM":35},"statut":"non_vendu","produitsVendus":[],"montantTotal":0,"raisonNonAchat":"Probleme de paiement / credit"},{"id":"v96","clientId":"c22","commercialId":"p_yaya","date":"2026-07-27","timestamp":"2026-07-27T09:50:00Z","gps":{"lat":14.80125,"lng":-16.92203,"distanceM":24},"statut":"vendu","produitsVendus":["cat4","cat1"],"montantTotal":10000,"raisonNonAchat":null},{"id":"v97","clientId":"c22","commercialId":"p_yaya","date":"2026-09-02","timestamp":"2026-09-02T09:41:00Z","gps":{"lat":14.79913,"lng":-16.92406,"distanceM":85},"statut":"non_vendu","produitsVendus":[],"montantTotal":0,"raisonNonAchat":"Probleme de paiement / credit"},{"id":"v98","clientId":"c22","commercialId":"p_yaya","date":"2026-08-27","timestamp":"2026-08-27T09:52:00Z","gps":{"lat":14.80163,"lng":-16.92267,"distanceM":102},"statut":"vendu","produitsVendus":["cat4","cat3","cat1"],"montantTotal":22000,"raisonNonAchat":null},{"id":"v99","clientId":"c22","commercialId":"p_yaya","date":"2026-07-25","timestamp":"2026-07-25T09:49:00Z","gps":{"lat":14.8,"lng":-16.92191,"distanceM":133},"statut":"vendu","produitsVendus":["cat3"],"montantTotal":12500,"raisonNonAchat":null},{"id":"v100","clientId":"c22","commercialId":"p_yaya","date":"2026-08-07","timestamp":"2026-08-07T09:33:00Z","gps":{"lat":14.79908,"lng":-16.9227,"distanceM":68},"statut":"vendu","produitsVendus":["cat3","cat1","cat2"],"montantTotal":15000,"raisonNonAchat":null},{"id":"v101","clientId":"c23","commercialId":"p_yaya","date":"2026-08-28","timestamp":"2026-08-28T09:15:00Z","gps":{"lat":14.78209,"lng":-16.92057,"distanceM":124},"statut":"non_vendu","produitsVendus":[],"montantTotal":0,"raisonNonAchat":"Probleme de paiement / credit"},{"id":"v102","clientId":"c23","commercialId":"p_yaya","date":"2026-09-03","timestamp":"2026-09-03T09:25:00Z","gps":{"lat":14.78307,"lng":-16.92014,"distanceM":93},"statut":"vendu","produitsVendus":["cat1"],"montantTotal":30000,"raisonNonAchat":null},{"id":"v103","clientId":"c23","commercialId":"p_yaya","date":"2026-08-22","timestamp":"2026-08-22T09:31:00Z","gps":{"lat":14.78242,"lng":-16.92013,"distanceM":67},"statut":"vendu","produitsVendus":["cat1","cat2","cat4"],"montantTotal":10000,"raisonNonAchat":null},{"id":"v104","clientId":"c23","commercialId":"p_yaya","date":"2026-08-01","timestamp":"2026-08-01T09:17:00Z","gps":{"lat":14.78208,"lng":-16.92242,"distanceM":52},"statut":"vendu","produitsVendus":["cat3"],"montantTotal":12500,"raisonNonAchat":null},{"id":"v105","clientId":"c24","commercialId":"p_yaya","date":"2026-09-03","timestamp":"2026-09-03T09:18:00Z","gps":{"lat":14.7842,"lng":-16.91601,"distanceM":21},"statut":"vendu","produitsVendus":["cat1","cat2","cat3"],"montantTotal":18000,"raisonNonAchat":null},{"id":"v106","clientId":"c24","commercialId":"p_yaya","date":"2026-08-03","timestamp":"2026-08-03T09:42:00Z","gps":{"lat":14.78263,"lng":-16.91574,"distanceM":123},"statut":"vendu","produitsVendus":["cat3","cat2","cat1"],"montantTotal":5000,"raisonNonAchat":null},{"id":"v107","clientId":"c24","commercialId":"p_yaya","date":"2026-08-05","timestamp":"2026-08-05T09:53:00Z","gps":{"lat":14.78229,"lng":-16.91545,"distanceM":117},"statut":"non_vendu","produitsVendus":[],"montantTotal":0,"raisonNonAchat":"Client ferme / absent"},{"id":"v108","clientId":"c24","commercialId":"p_yaya","date":"2026-08-31","timestamp":"2026-08-31T09:48:00Z","gps":{"lat":14.78242,"lng":-16.91721,"distanceM":90},"statut":"non_vendu","produitsVendus":[],"montantTotal":0,"raisonNonAchat":"Probleme de paiement / credit"},{"id":"v109","clientId":"c24","commercialId":"p_yaya","date":"2026-07-26","timestamp":"2026-07-26T09:34:00Z","gps":{"lat":14.78495,"lng":-16.916,"distanceM":91},"statut":"vendu","produitsVendus":["cat4","cat1"],"montantTotal":7500,"raisonNonAchat":null},{"id":"v110","clientId":"c25","commercialId":"p_alioune","date":"2026-08-08","timestamp":"2026-08-08T09:36:00Z","gps":{"lat":14.69252,"lng":-17.46462,"distanceM":66},"statut":"vendu","produitsVendus":["cat1","cat2"],"montantTotal":22000,"raisonNonAchat":null},{"id":"v111","clientId":"c25","commercialId":"p_alioune","date":"2026-08-15","timestamp":"2026-08-15T09:19:00Z","gps":{"lat":14.69356,"lng":-17.46456,"distanceM":103},"statut":"vendu","produitsVendus":["cat1"],"montantTotal":7500,"raisonNonAchat":null},{"id":"v112","clientId":"c25","commercialId":"p_alioune","date":"2026-08-29","timestamp":"2026-08-29T09:18:00Z","gps":{"lat":14.69317,"lng":-17.46422,"distanceM":103},"statut":"non_vendu","produitsVendus":[],"montantTotal":0,"raisonNonAchat":"Probleme de paiement / credit"},{"id":"v113","clientId":"c25","commercialId":"p_alioune","date":"2026-07-31","timestamp":"2026-07-31T09:36:00Z","gps":{"lat":14.69256,"lng":-17.46398,"distanceM":39},"statut":"vendu","produitsVendus":["cat1","cat2"],"montantTotal":15000,"raisonNonAchat":null},{"id":"v114","clientId":"c26","commercialId":"p_alioune","date":"2026-08-29","timestamp":"2026-08-29T09:19:00Z","gps":{"lat":14.68817,"lng":-17.47799,"distanceM":62},"statut":"vendu","produitsVendus":["cat3"],"montantTotal":30000,"raisonNonAchat":null},{"id":"v115","clientId":"c26","commercialId":"p_alioune","date":"2026-08-12","timestamp":"2026-08-12T09:46:00Z","gps":{"lat":14.68688,"lng":-17.47737,"distanceM":79},"statut":"vendu","produitsVendus":["cat1","cat3","cat2"],"montantTotal":5000,"raisonNonAchat":null},{"id":"v116","clientId":"c26","commercialId":"p_alioune","date":"2026-08-24","timestamp":"2026-08-24T09:31:00Z","gps":{"lat":14.68725,"lng":-17.47812,"distanceM":87},"statut":"vendu","produitsVendus":["cat4"],"montantTotal":7500,"raisonNonAchat":null},{"id":"v117","clientId":"c26","commercialId":"p_alioune","date":"2026-08-26","timestamp":"2026-08-26T09:15:00Z","gps":{"lat":14.68844,"lng":-17.47801,"distanceM":15},"statut":"non_vendu","produitsVendus":[],"montantTotal":0,"raisonNonAchat":"Client ferme / absent"},{"id":"v118","clientId":"c26","commercialId":"p_alioune","date":"2026-08-06","timestamp":"2026-08-06T09:29:00Z","gps":{"lat":14.68836,"lng":-17.47633,"distanceM":102},"statut":"vendu","produitsVendus":["cat1","cat4","cat3"],"montantTotal":10000,"raisonNonAchat":null},{"id":"v119","clientId":"c31","commercialId":"p_amadou","date":"2026-07-27","timestamp":"2026-07-27T09:27:00Z","gps":{"lat":14.75277,"lng":-17.39155,"distanceM":28},"statut":"vendu","produitsVendus":["cat4","cat2","cat3"],"montantTotal":12500,"raisonNonAchat":null},{"id":"v120","clientId":"c32","commercialId":"p_alioune","date":"2026-08-03","timestamp":"2026-08-03T09:17:00Z","gps":{"lat":14.70572,"lng":-17.47752,"distanceM":118},"statut":"vendu","produitsVendus":["cat3","cat1"],"montantTotal":12500,"raisonNonAchat":null},{"id":"v121","clientId":"c31","commercialId":"p_amadou","date":"2026-09-02","timestamp":"2026-09-02T10:15:00Z","gps":{"lat":14.75344,"lng":-17.39082,"distanceM":22},"statut":"vendu","produitsVendus":["cat1","cat4"],"montantTotal":12000,"raisonNonAchat":null},{"id":"v122","clientId":"c32","commercialId":"p_alioune","date":"2026-09-03","timestamp":"2026-09-03T10:15:00Z","gps":{"lat":14.70687,"lng":-17.47756,"distanceM":22},"statut":"vendu","produitsVendus":["cat2","cat1"],"montantTotal":18000,"raisonNonAchat":null}],"fichesSuperviseur":[{"id":"f1","superviseurId":"p_said","commercialId":"p_alioune","clientId":"c3","date":"2026-08-24","modeVisite":"avec_commercial","produitsPresents":["cat1"],"commercialVerifie":true,"concurrence":"Charcuterie Import Vitesse presente, faible rotation.","notes":"Tournee conjointe RAS, bon respect du planogramme.","gps":{"lat":14.69604,"lng":-17.45355,"distanceM":57}},{"id":"f2","superviseurId":"p_said","commercialId":"p_alioune","clientId":"c4","date":"2026-09-02","modeVisite":"seul","produitsPresents":["cat4"],"commercialVerifie":true,"concurrence":"Yoplait bien implante, prix legerement inferieur aux notres.","notes":"Controle solo, verification de la presence produit.","gps":{"lat":14.6845,"lng":-17.47029,"distanceM":74}},{"id":"f3","superviseurId":"p_said","commercialId":"p_vieux","clientId":"c10","date":"2026-08-23","modeVisite":"avec_commercial","produitsPresents":["cat4"],"commercialVerifie":true,"concurrence":"Bonne visibilite de nos produits, peu de concurrence directe.","notes":"Tournee conjointe RAS, bon respect du planogramme.","gps":{"lat":14.73858,"lng":-17.41802,"distanceM":12}},{"id":"f4","superviseurId":"p_said","commercialId":"p_vieux","clientId":"c9","date":"2026-09-04","modeVisite":"seul","produitsPresents":["cat1","cat2"],"commercialVerifie":true,"concurrence":"Concurrent local (marque non identifiee) sur les yaourts a boire.","notes":"Controle solo, verification de la presence produit.","gps":{"lat":14.76107,"lng":-17.43148,"distanceM":61}},{"id":"f5","superviseurId":"p_maguette","commercialId":"p_amadou","clientId":"c14","date":"2026-08-25","modeVisite":"avec_commercial","produitsPresents":["cat4"],"commercialVerifie":true,"concurrence":"Presence de Sonatel Ice Cream en tete de gondole.","notes":"Tournee conjointe RAS, bon respect du planogramme.","gps":{"lat":14.75088,"lng":-17.36971,"distanceM":30}},{"id":"f6","superviseurId":"p_maguette","commercialId":"p_amadou","clientId":"c12","date":"2026-08-23","modeVisite":"seul","produitsPresents":["cat4","cat3","cat2"],"commercialVerifie":true,"concurrence":"Presence de Sonatel Ice Cream en tete de gondole.","notes":"Controle solo, verification de la presence produit.","gps":{"lat":14.74731,"lng":-17.40096,"distanceM":41}},{"id":"f7","superviseurId":"p_maguette","commercialId":"p_iba","clientId":"c19","date":"2026-08-16","modeVisite":"avec_commercial","produitsPresents":["cat1","cat2"],"commercialVerifie":true,"concurrence":"Aucune marque concurrente visible ce jour.","notes":"Tournee conjointe RAS, bon respect du planogramme.","gps":{"lat":14.71734,"lng":-17.30404,"distanceM":57}},{"id":"f8","superviseurId":"p_maguette","commercialId":"p_iba","clientId":"c18","date":"2026-09-01","modeVisite":"seul","produitsPresents":["cat2","cat1"],"commercialVerifie":true,"concurrence":"Presence de Sonatel Ice Cream en tete de gondole.","notes":"Controle solo, verification de la presence produit.","gps":{"lat":14.72375,"lng":-17.29125,"distanceM":77}},{"id":"f9","superviseurId":"p_famara","commercialId":"p_yaya","clientId":"c22","date":"2026-08-23","modeVisite":"avec_commercial","produitsPresents":["cat2","cat1"],"commercialVerifie":true,"concurrence":"Presence de Sonatel Ice Cream en tete de gondole.","notes":"Tournee conjointe RAS, bon respect du planogramme.","gps":{"lat":14.80068,"lng":-16.92286,"distanceM":19}},{"id":"f10","superviseurId":"p_famara","commercialId":"p_yaya","clientId":"c23","date":"2026-09-01","modeVisite":"seul","produitsPresents":["cat2"],"commercialVerifie":false,"concurrence":"Bonne visibilite de nos produits, peu de concurrence directe.","notes":"Controle solo, verification de la presence produit.","gps":{"lat":14.7822,"lng":-16.9204,"distanceM":19}},{"id":"f11","superviseurId":"p_said","commercialId":"p_vieux","clientId":"c28","date":"2026-08-29","modeVisite":"seul_prospection","produitsPresents":[],"commercialVerifie":false,"concurrence":"","notes":"Nouveau point de vente repere lors de la tournee solo.","gps":{"lat":14.75131,"lng":-17.45565,"distanceM":16}},{"id":"f12","superviseurId":"p_maguette","commercialId":"p_iba","clientId":"c29","date":"2026-08-29","modeVisite":"seul_prospection","produitsPresents":[],"commercialVerifie":false,"concurrence":"","notes":"Nouveau point de vente repere lors de la tournee solo.","gps":{"lat":14.71614,"lng":-17.31058,"distanceM":36}},{"id":"f13","superviseurId":"p_said","commercialId":"p_alioune","clientId":"c32","date":"2026-08-18","modeVisite":"seul_prospection","produitsPresents":[],"commercialVerifie":false,"concurrence":"","notes":"Nouveau point de vente repere lors de la tournee solo.","gps":{"lat":14.70637,"lng":-17.47806,"distanceM":34}}]};
+const RAISONS_NON_ACHAT = [
+  "Rupture de stock chez le client","Client fermé / absent","Prix jugé trop élevé",
+  "Pas de besoin actuellement","Problème de paiement / crédit","Autre"
+];
+const JOURS_FR = ["Dimanche","Lundi","Mardi","Mercredi","Jeudi","Vendredi","Samedi"];
+/* Liste de concurrents à adapter à votre marché — modifiable ici pour alimenter la liste déroulante
+   du commercial et du superviseur lors de l'identification de la concurrence en boutique. */
+const CONCURRENTS = ["Vitalait","Nestlé","Patisen","Siagro","Kirene","Salam","SEDIMA","Produit importé générique","Autre"];
 /* Contour simplifié du Sénégal (lng,lat), source : découpage administratif public simplifié. */
 const SENEGAL_OUTLINE = [[-16.7137,13.595],[-17.1261,14.3735],[-17.625,14.7295],[-17.1852,14.9195],[-16.7007,15.6215],[-16.4631,16.135],[-16.1207,16.4557],[-15.6237,16.3693],[-15.1357,16.5873],[-14.5773,16.5983],[-14.0995,16.3043],[-13.4357,16.0394],[-12.8307,15.3037],[-12.1707,14.6168],[-12.1249,13.9947],[-11.9277,13.4221],[-11.5534,13.1412],[-11.4679,12.7545],[-11.5139,12.443],[-11.6583,12.3866],[-12.2036,12.4656],[-12.2786,12.3544],[-12.4991,12.3321],[-13.2178,12.5759],[-13.7005,12.5862],[-15.5485,12.6282],[-15.8166,12.5156],[-16.1477,12.5478],[-16.6775,12.3849],[-16.8415,13.1514],[-15.9313,13.1303],[-15.691,13.2704],[-15.5118,13.2786],[-15.1412,13.5095],[-14.7122,13.2982],[-14.2777,13.2806],[-13.845,13.505],[-14.047,13.7941],[-14.3767,13.6257],[-14.687,13.6304],[-15.0817,13.8765],[-15.3988,13.8604],[-15.6246,13.6236],[-16.7137,13.595]];
 const DAKAR_COORD = {lat:14.6928, lng:-17.4467};
@@ -279,6 +384,36 @@ function haversineM(lat1,lng1,lat2,lng2){
   return R*2*Math.asin(Math.sqrt(a));
 }
 function uidTmp(){ return 'tmp_'+Math.random().toString(36).slice(2,9); }
+/* Capture GPS avec filet de sécurité : sur certains ordinateurs (services de localisation
+   désactivés au niveau du système, ou bug connu de certains navigateurs sous Windows), le
+   navigateur peut ne JAMAIS rappeler ni le succès ni l'erreur de getCurrentPosition, même après
+   avoir autorisé l'accès dans la popup — le bouton reste alors bloqué indéfiniment sur
+   « Localisation… ». On force donc nous-mêmes un délai maximum pour garantir qu'un message clair
+   s'affiche toujours et que le bouton redevient utilisable, même si le navigateur ne répond jamais. */
+function getPositionWithFallback(onSuccess, onError, timeoutMs){
+  timeoutMs = timeoutMs || 9000;
+  if(!navigator.geolocation){
+    onError({code:0, message:"Géolocalisation non prise en charge par ce navigateur."});
+    return;
+  }
+  let done = false;
+  const timer = setTimeout(()=>{
+    if(done) return; done = true;
+    onError({code:3, message:"Délai dépassé — aucune réponse du navigateur. Vérifiez que la localisation est activée : sur Windows, Paramètres > Confidentialité et sécurité > Position ; sur Mac, Réglages Système > Confidentialité et sécurité > Service de localisation. Vous pouvez continuer sans GPS."});
+  }, timeoutMs);
+  try{
+    navigator.geolocation.getCurrentPosition(pos=>{
+      if(done) return; done = true; clearTimeout(timer);
+      onSuccess(pos);
+    }, err=>{
+      if(done) return; done = true; clearTimeout(timer);
+      onError(err);
+    }, {timeout: timeoutMs, enableHighAccuracy:true});
+  }catch(e){
+    if(done) return; done = true; clearTimeout(timer);
+    onError({code:0, message: (e && e.message) || 'erreur inconnue'});
+  }
+}
 function escapeHtml(s){ return String(s==null?'':s).replace(/[&<>"']/g, c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
 function el(tag, attrs, children){
   const n = document.createElementNS(tag==='svg'||attrs&&attrs.__svg ? 'http://www.w3.org/2000/svg' : null, tag);
@@ -302,102 +437,54 @@ function clientPrimaryZoneColor(secteur){
   return ['var(--s1)','var(--s2)','var(--s3)','var(--s4)','var(--s5)','var(--s6)','var(--s7)','var(--s8)'][idx % 8] || 'var(--s5)';
 }
 
-
-/* ============================== STOCKAGE LOCAL (mode autonome, sans serveur) ==============================
-   Cette version fonctionne entièrement dans le navigateur : les données (clients, ventes, fiches) sont
-   enregistrées dans le stockage local de CE navigateur, sur CET appareil. Elles ne sont donc pas partagées
-   automatiquement entre le téléphone d'un commercial et celui d'un superviseur — pratique pour tester,
-   mais pour un vrai déploiement multi-utilisateurs il faut la version connectée (base de données partagée). */
-const LS_DATA_KEY = 'rtm_local_data_v2';
+/* ============================== DB LAYER ============================== */
+const listeners = [];
+function subscribeCollection(name, map, opts){
+  if(!APP.db) return;
+  let ref = APP.db.collection(name);
+  if(opts && opts.orderBy) ref = ref.orderBy(opts.orderBy, 'desc');
+  if(opts && opts.limit) ref = ref.limit(opts.limit);
+  const unsub = ref.onSnapshot(snap=>{
+    map.clear();
+    snap.docs.forEach(d=>{ const data = d.data(); if(data) map.set(d.id, Object.assign({id:d.id}, data)); });
+    scheduleRender();
+  }, err=>{
+    console.error('db error', name, err);
+  });
+  listeners.push(unsub);
+}
 let renderScheduled = false;
 function scheduleRender(){
   if(renderScheduled) return;
   renderScheduled = true;
   requestAnimationFrame(()=>{ renderScheduled = false; render(); });
 }
-function genId(prefix){ return prefix + '_' + Date.now().toString(36) + Math.random().toString(36).slice(2,7); }
 
-function collectionMap(name){
-  return {profils:APP.profils, produits:APP.produits, clients:APP.clients, visites:APP.visites, fichesSuperviseur:APP.fiches}[name];
-}
-function loadLocalData(){
-  let raw = null;
-  try{ raw = localStorage.getItem(LS_DATA_KEY); }catch(e){}
-  let data = null;
-  if(raw){ try{ data = JSON.parse(raw); }catch(e){ data = null; } }
-  if(!data) data = JSON.parse(JSON.stringify(SEED_DATA));
-  APP.profils.clear(); (data.profils||[]).forEach(p=>APP.profils.set(p.id, p));
-  APP.produits.clear(); (data.produits||[]).forEach(p=>APP.produits.set(p.id, p));
-  APP.clients.clear(); (data.clients||[]).forEach(c=>APP.clients.set(c.id, c));
-  APP.visites.clear(); (data.visites||[]).forEach(v=>APP.visites.set(v.id, v));
-  APP.fiches.clear(); (data.fichesSuperviseur||[]).forEach(f=>APP.fiches.set(f.id, f));
-}
-function persistLocalData(){
-  const dump = {
-    profils:[...APP.profils.values()], produits:[...APP.produits.values()], clients:[...APP.clients.values()],
-    visites:[...APP.visites.values()], fichesSuperviseur:[...APP.fiches.values()],
-  };
-  try{ localStorage.setItem(LS_DATA_KEY, JSON.stringify(dump)); APP.lastSaved = new Date(); }
-  catch(e){ console.error('Sauvegarde locale impossible', e); toast('Stockage local indisponible (mode navigation privée ?)', 'critical'); }
-}
-function resetLocalData(){
-  try{ localStorage.removeItem(LS_DATA_KEY); }catch(e){}
-  loadLocalData(); persistLocalData(); toast('Données de démonstration réinitialisées.', 'good'); render();
-}
-const LocalDB = {
-  collection(name){
-    return { add(data){
-      return new Promise(resolve=>{
-        const id = genId(name[0]||'x');
-        const rec = Object.assign({id}, data);
-        collectionMap(name).set(id, rec);
-        persistLocalData(); scheduleRender();
-        resolve({id});
-      });
-    }};
-  },
-  doc(path){
-    const idx = path.indexOf('/');
-    const name = path.slice(0, idx), id = path.slice(idx+1);
-    return {
-      update(patch){
-        return new Promise((resolve,reject)=>{
-          const map = collectionMap(name); const cur = map.get(id);
-          if(!cur){ reject(new Error('Document introuvable')); return; }
-          map.set(id, Object.assign({}, cur, patch));
-          persistLocalData(); scheduleRender(); resolve();
-        });
-      },
-      set(data){
-        return new Promise(resolve=>{
-          collectionMap(name).set(id, Object.assign({id}, data));
-          persistLocalData(); scheduleRender(); resolve();
-        });
-      },
-    };
-  },
-};
-const LocalDownloads = {
-  save({filename, data}){
-    return new Promise(resolve=>{
-      const blob = data instanceof Blob ? data : new Blob([data]);
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement('a');
-      a.href = url; a.download = filename; document.body.appendChild(a); a.click(); document.body.removeChild(a);
-      setTimeout(()=>URL.revokeObjectURL(url), 4000);
-      resolve({status:'saved'});
-    });
+async function boot(){
+  render(); // login / loading screen first
+  if(!supabaseConfigured()){
+    APP.configError = true;
+    render();
+    return;
   }
-};
-
-function boot(){
-  APP.db = LocalDB;
+  try{
+    const sb = supabase.createClient(SUPABASE_CONFIG.url, SUPABASE_CONFIG.anonKey);
+    APP.sb = sb;
+    APP.db = makeSupabaseDbShim(sb);
+  }catch(e){ APP.db = null; }
   APP.downloads = LocalDownloads;
-  APP.dbReady = true;
-  loadLocalData();
+  if(APP.db){
+    APP.dbReady = true;
+    subscribeCollection('profils', APP.profils);
+    subscribeCollection('produits', APP.produits);
+    subscribeCollection('clients', APP.clients);
+    subscribeCollection('visites', APP.visites, {orderBy:'date', limit:600});
+    subscribeCollection('fichesSuperviseur', APP.fiches, {orderBy:'date', limit:300});
+    subscribeCollection('relevesPrix', APP.relevesPrix, {orderBy:'date', limit:300});
+  }
   restoreSession();
   window.addEventListener('hashchange', ()=>{ APP.route = location.hash || null; render(); });
-  render();
+  scheduleRender();
 }
 function restoreSession(){
   try{
@@ -415,29 +502,10 @@ function myClients(commercialId){
 function myProspects(commercialId){
   return [...APP.clients.values()].filter(c=>c.commercialId===commercialId && c.statut==='prospect');
 }
-function myAValider(commercialId){
-  return [...APP.clients.values()].filter(c=>c.commercialId===commercialId && c.statut==='a_valider');
-}
-function secteurForZone(zone){
-  return SECTEUR_NAMES.find(s => SECTEURS_DATA[s].zones.includes(zone)) || null;
-}
 function responsibleCommercialForZone(zone){
   const secteur = secteurForZone(zone);
   if(!secteur) return null;
   return [...APP.profils.values()].find(p=>p.role==='commercial' && p.secteur===secteur) || null;
-}
-function zonesForSecteur(secteur){
-  return secteur && SECTEURS_DATA[secteur] ? SECTEURS_DATA[secteur].zones : [];
-}
-function secteursForEquipe(user){
-  return [...new Set((user.equipe||[]).map(id=>APP.profils.get(id)).filter(Boolean).map(p=>p.secteur))];
-}
-function isClientVerified(c){
-  return !!(c.secteur && c.zone && c.telephone && c.nombreVisites && (c.joursVisite||[]).length);
-}
-function firstSaleFor(clientId){
-  const ventes = visitesForClient(clientId).filter(v=>v.statut==='vendu');
-  return ventes.length ? ventes[ventes.length-1] : null;
 }
 function myProspectsHistory(commercialId){
   return [...APP.clients.values()].filter(c=>c.commercialId===commercialId && (c.statut==='prospect' || c.statut==='a_valider' || c.origineProspection))
@@ -500,26 +568,6 @@ function filteredVisites({commercialId, secteur, sinceISO, toISO}){
   });
 }
 
-/* ============================== SÉLECTEUR DE PLAGE DE DATES (réutilisable) ============================== */
-function dateRangeHTML(idPrefix, fromISO, toISO){
-  return `<div class="date-range" style="display:flex;align-items:center;gap:6px;">
-    <input type="date" id="${idPrefix}-from" value="${fromISO||''}" max="${todayISO()}" title="Du">
-    <span class="helptext" style="margin:0;">→</span>
-    <input type="date" id="${idPrefix}-to" value="${toISO||''}" max="${todayISO()}" title="Au">
-  </div>`;
-}
-function wireDateRange(container, idPrefix, onChange){
-  const fromEl = container.querySelector('#'+idPrefix+'-from');
-  const toEl = container.querySelector('#'+idPrefix+'-to');
-  function apply(){
-    let from = fromEl.value, to = toEl.value;
-    if(from && to && from > to){ toEl.value = from; to = from; }
-    onChange(from || '2000-01-01', to || todayISO());
-  }
-  fromEl.addEventListener('change', apply);
-  toEl.addEventListener('change', apply);
-}
-
 /* ============================== ROUTER / RENDER ============================== */
 function defaultRoute(user){
   if(!user) return '#/login';
@@ -527,9 +575,6 @@ function defaultRoute(user){
   if(user.role==='direction') return '#/activite';
   if(user.role==='adv') return '#/comptes';
   return '#/tournee';
-}
-function routeAllowed(user, route){
-  return navFor(user).some(it=>it.r===route);
 }
 function setRoute(route){ location.hash = route; APP.route = route; render(); }
 
@@ -544,6 +589,10 @@ function resolveCurrentUser(){
 function render(){
   const root = document.getElementById('app');
   const user = resolveCurrentUser();
+  if(APP.configError){
+    root.innerHTML = renderConfigErrorHTML();
+    return;
+  }
   if(!APP.dbReady){
     root.innerHTML = renderLoadingHTML();
     return;
@@ -560,6 +609,24 @@ function render(){
   renderRoute(content, user, APP.route);
 }
 
+function renderConfigErrorHTML(){
+  return `<div class="login-wrap"><div class="login-card" style="max-width:460px;">
+    <div class="login-title">
+      <div class="brand" style="justify-content:center;margin-bottom:10px;">
+        <div class="brand-mark">RM</div>
+        <div class="brand-text" style="text-align:left"><b>Route to Market</b><span>Suivi commercial &amp; supervision</span></div>
+      </div>
+      <h1 style="font-size:18px;">Configuration requise</h1>
+      <p class="page-sub">La connexion à la base de données partagée (Supabase) n'est pas encore configurée.</p>
+    </div>
+    <div style="font-size:13px;color:var(--text-muted);line-height:1.6;">
+      Ouvrez le fichier <code>index.html</code> et remplacez <code>SUPABASE_CONFIG.url</code> et
+      <code>SUPABASE_CONFIG.anonKey</code> par les valeurs de votre projet Supabase
+      (Project Settings → API). Voir le guide de déploiement fourni.
+    </div>
+  </div></div>`;
+}
+
 function renderLoadingHTML(){
   return `<div class="login-wrap"><div style="text-align:center;color:var(--text-muted);font-size:13px;">
     <div style="width:28px;height:28px;border:3px solid var(--border);border-top-color:var(--accent);border-radius:50%;
@@ -570,53 +637,56 @@ function renderLoadingHTML(){
 }
 
 function renderLoginHTML(){
-  const commerciaux = [...APP.profils.values()].filter(p=>p.role==='commercial');
-  const superviseurs = [...APP.profils.values()].filter(p=>p.role==='superviseur');
-  const direction = [...APP.profils.values()].filter(p=>p.role==='direction');
-  const adv = [...APP.profils.values()].filter(p=>p.role==='adv');
-  function cards(list){
-    if(!list.length) return `<div class="empty-state">Aucun profil disponible pour le moment.</div>`;
-    return `<div class="profile-grid">${list.map(p=>{
-      let sub = p.secteur ? (p.secteur + (p.fonction && p.fonction!=='Chef de secteur' ? ' · '+p.fonction : '')) : (p.equipe? p.equipe.length+' commerciaux' : '');
-      if(!sub && p.role==='direction') sub = 'Vue globale (lecture seule)';
-      if(!sub && p.role==='adv') sub = 'Création des comptes clients';
-      return `<div class="profile-card" data-pick="${p.id}">
-        <div class="avatar lg">${initials(p.nom)}</div>
-        <div><b>${escapeHtml(p.nom)}</b><span>${escapeHtml(sub)}</span></div>
-      </div>`;
-    }).join('')}</div>`;
-  }
-  return `<div class="login-wrap"><div class="login-card">
+  const allProfiles = [...APP.profils.values()];
+  return `<div class="login-wrap"><div class="login-card" style="max-width:400px;">
     <div class="login-title">
       <div class="brand" style="justify-content:center;margin-bottom:10px;">
         <div class="brand-mark">RM</div>
         <div class="brand-text" style="text-align:left"><b>Route to Market</b><span>Suivi commercial &amp; supervision</span></div>
       </div>
-      <h1 style="font-size:18px;">Qui êtes-vous&nbsp;?</h1>
-      <p class="page-sub">Sélectionnez votre profil pour accéder à votre espace.</p>
+      <h1 style="font-size:18px;">Connexion</h1>
+      <p class="page-sub">Entrez votre nom d'utilisateur et votre mot de passe.</p>
     </div>
-    <div class="card-title" style="margin:18px 0 8px;">Commerciaux</div>
-    ${cards(commerciaux)}
-    <div class="card-title" style="margin:18px 0 8px;">Superviseurs</div>
-    ${cards(superviseurs)}
-    <div class="card-title" style="margin:18px 0 8px;">ADV (création des comptes)</div>
-    ${cards(adv)}
-    <div class="card-title" style="margin:18px 0 8px;">Direction (lecture seule)</div>
-    ${cards(direction)}
+    <form id="login-form" autocomplete="on">
+      <label class="field">Nom d'utilisateur<input type="text" id="login-user" name="username" autocomplete="username" placeholder="Ex : Alioune Fall" list="login-users-list"></label>
+      <datalist id="login-users-list">${allProfiles.map(p=>`<option value="${escapeHtml(p.identifiant||p.nom)}">`).join('')}</datalist>
+      <label class="field" style="margin-top:10px;">Mot de passe<input type="password" id="login-pass" name="password" autocomplete="current-password" placeholder="••••••••"></label>
+      <div id="login-error" style="display:none;margin-top:10px;background:var(--critical-soft);border:1px solid var(--critical-border);color:var(--critical);padding:8px 12px;border-radius:8px;font-size:13px;"></div>
+      <button type="submit" class="btn primary" style="width:100%;justify-content:center;margin-top:16px;">Se connecter</button>
+    </form>
   </div></div>`;
 }
 function initials(nom){ return (nom||'?').split(' ').map(s=>s[0]).slice(0,2).join('').toUpperCase(); }
 
+function findProfilByCredentials(username, password){
+  const u = (username||'').trim().toLowerCase();
+  const pw = (password||'').trim().toLowerCase();
+  if(!u || !pw) return null;
+  return [...APP.profils.values()].find(p=>{
+    const ident = (p.identifiant || p.nom || '').trim().toLowerCase();
+    const pass = (p.motDePasse || '').trim().toLowerCase();
+    return ident===u && pass===pw;
+  }) || null;
+}
+
 function wireLogin(){
-  document.querySelectorAll('[data-pick]').forEach(elx=>{
-    elx.addEventListener('click', ()=>{
-      const id = elx.getAttribute('data-pick');
-      const p = APP.profils.get(id);
-      if(!p) return;
-      APP.currentUser = p;
-      saveSession(id);
-      setRoute(defaultRoute(p));
-    });
+  const form = document.getElementById('login-form');
+  if(!form) return;
+  form.addEventListener('submit', (e)=>{
+    e.preventDefault();
+    const userInput = document.getElementById('login-user');
+    const passInput = document.getElementById('login-pass');
+    const errBox = document.getElementById('login-error');
+    const p = findProfilByCredentials(userInput.value, passInput.value);
+    if(!p){
+      errBox.textContent = "Nom d'utilisateur ou mot de passe incorrect.";
+      errBox.style.display = 'block';
+      return;
+    }
+    errBox.style.display = 'none';
+    APP.currentUser = p;
+    saveSession(p.id);
+    setRoute(defaultRoute(p));
   });
 }
 
@@ -639,6 +709,8 @@ const ICONS = {
   journal: '<path d="M6 3h9l4 4v13a1 1 0 0 1-1 1H6a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1Z"/><path d="M14 3v5h5M8 12h7M8 16h7M8 9h3"/>',
   db: '<ellipse cx="12" cy="5" rx="8" ry="3"/><path d="M4 5v14c0 1.7 3.6 3 8 3s8-1.3 8-3V5"/><path d="M4 12c0 1.7 3.6 3 8 3s8-1.3 8-3"/>',
   idcard: '<rect x="3" y="5" width="18" height="14" rx="2"/><circle cx="8.5" cy="12" r="2"/><path d="M6 16.5c.5-1.5 1.8-2.3 2.5-2.3s2 .8 2.5 2.3M14 9h5M14 12h5M14 15h3"/>',
+  camera: '<path d="M4 8h3l1.5-2.5h7L17 8h3a1 1 0 0 1 1 1v10a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1V9a1 1 0 0 1 1-1Z"/><circle cx="12" cy="13.5" r="3.5"/>',
+  tag: '<path d="M20 12.5 12.5 20a1.5 1.5 0 0 1-2.1 0L4 13.6a1.5 1.5 0 0 1 0-2.1L11.5 4H19a1 1 0 0 1 1 1v7.5Z"/><circle cx="15.5" cy="8.5" r="1.3"/>',
 };
 function icon(name, cls){ return `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="${cls||''}">${ICONS[name]||''}</svg>`; }
 
@@ -657,6 +729,7 @@ function navFor(user){
     return [
       {r:'#/comptes', l:'Comptes à créer', i:'idcard'},
       {r:'#/activite', l:'Activité générale', i:'journal'},
+      {r:'#/superviseurs', l:'Suivi des superviseurs', i:'clipboard'},
       {r:'#/equipe', l:'Vue équipe', i:'team'},
       {r:'#/dashboard', l:'Tableau de bord', i:'chart'},
       {r:'#/base-clients', l:'Base de données clients', i:'db'},
@@ -676,6 +749,7 @@ function navFor(user){
   return [
     {r:'#/fiche', l:'Fiche de suivi', i:'clipboard'},
     {r:'#/journal', l:'Journal d\'activité', i:'journal'},
+    {r:'#/pricing', l:'Pricing marché', i:'tag'},
     {r:'#/equipe', l:'Vue équipe', i:'team'},
     {r:'#/dashboard', l:'Tableau de bord', i:'chart'},
     {r:'#/base-clients', l:'Base de données clients', i:'db'},
@@ -685,8 +759,9 @@ function navFor(user){
 const PAGE_TITLES = {
   '#/tournee':'Ma tournée du jour', '#/historique':'Historique des tournées', '#/prospects':'Historique de prospection',
   '#/base-clients':'Base de données clients', '#/carte':'Carte clients',
-  '#/mes-stats':'Mes statistiques', '#/fiche':'Fiche de suivi superviseur', '#/journal':'Journal d\'activité superviseur', '#/equipe':'Vue équipe',
+  '#/mes-stats':'Mes statistiques', '#/fiche':'Fiche de suivi superviseur', '#/journal':'Journal d\'activité superviseur', '#/pricing':'Pricing marché', '#/equipe':'Vue équipe',
   '#/dashboard':'Tableau de bord', '#/comptes':'Comptes à créer', '#/activite':'Activité générale',
+  '#/superviseurs':'Suivi des superviseurs',
 };
 
 function renderShellHTML(user){
@@ -702,13 +777,13 @@ function renderShellHTML(user){
         <div class="nav-section-label">Navigation</div>
         ${items.map(it=>`<div class="nav-item ${APP.route===it.r?'active':''}" data-nav="${it.r}">${icon(it.i)}<span>${it.l}</span></div>`).join('')}
       </div>
-      <div class="sidebar-foot">Route to Market · mode autonome<br>Données stockées sur cet appareil.<br><button class="btn ghost sm" id="reset-data" style="margin-top:6px;padding:3px 8px;">Réinitialiser la démo</button></div>
+      <div class="sidebar-foot">Route to Market · version connectée<br>Données partagées, synchronisées en temps réel.</div>
     </aside>
     <div class="main-col">
       <div class="topbar">
         <div class="topbar-title">${PAGE_TITLES[APP.route] || ''}</div>
         <div class="topbar-right">
-          <div class="sync-label"><span class="sync-dot"></span>Enregistré sur cet appareil</div>
+          <div class="sync-label"><span class="sync-dot"></span>Synchronisé en temps réel</div>
           <button class="profile-chip" id="profile-switch"><div class="avatar">${initials(user.nom)}</div><span>${escapeHtml(user.nom)}</span>${icon('logout')}</button>
         </div>
       </div>
@@ -720,8 +795,6 @@ function wireShell(user){
   document.querySelectorAll('[data-nav]').forEach(n=>n.addEventListener('click', ()=>setRoute(n.getAttribute('data-nav'))));
   const sw = document.getElementById('profile-switch');
   if(sw) sw.addEventListener('click', ()=>{ clearSession(); setRoute('#/login'); });
-  const rs = document.getElementById('reset-data');
-  if(rs) rs.addEventListener('click', ()=>{ if(confirm('Réinitialiser toutes les données locales avec le jeu de démonstration ? Cette action efface vos saisies de test.')) resetLocalData(); });
 }
 
 function renderRoute(content, user, route){
@@ -733,18 +806,19 @@ function renderRoute(content, user, route){
   if(route==='#/mes-stats') return renderDashboard(content, user, {scope:'me'});
   if(route==='#/fiche') return renderFiche(content, user);
   if(route==='#/journal') return renderJournalSuperviseur(content, user);
+  if(route==='#/pricing') return renderPricing(content, user);
   if(route==='#/equipe') return renderEquipe(content, user);
   if(route==='#/dashboard') return renderDashboard(content, user, {scope:'all'});
   if(route==='#/comptes') return renderComptesAValider(content, user);
   if(route==='#/activite') return renderActiviteGenerale(content, user);
+  if(route==='#/superviseurs') return renderSuiviSuperviseurs(content, user);
   content.innerHTML = `<div class="empty-state">Page introuvable.</div>`;
 }
 
 /* ============================== DEMO BANNER ============================== */
 function demoBannerHTML(){
-  try{ if(localStorage.getItem('rtm_hide_demo')==='1') return ''; }catch(e){}
-  return `<div class="demo-banner"><span>${icon('pin','')}&nbsp; Version de test autonome : données de démonstration stockées uniquement dans ce navigateur (non partagées entre appareils). Utilisez « Réinitialiser la démo » dans le menu pour repartir de zéro.</span>
-    <button class="btn ghost sm" id="hide-demo">Masquer</button></div>`;
+  // Application connectée (données partagées via Supabase) : pas de bandeau de démo.
+  return '';
 }
 function wireDemoBanner(container){
   const b = container.querySelector('#hide-demo');
@@ -781,112 +855,6 @@ function renderTournee(content, user){
     else renderTourneeProspecter(body, user);
   }
   renderTab();
-}
-
-function renderTourneeAujourdhui(body, user){
-  const today = todayWeekdayFR();
-  const all = myClients(user.id);
-  const todays = all.filter(c => (c.joursVisite||[]).includes(today));
-  const byZone = {};
-  todays.forEach(c=>{ (byZone[c.zone] = byZone[c.zone]||[]).push(c); });
-  const prospects = myProspects(user.id);
-  const aValider = myAValider(user.id);
-
-  let visitedCount = 0, soldCount = 0;
-  todays.forEach(c=>{ const v = visiteToday(c.id, user.id); if(v){ visitedCount++; if(v.statut==='vendu') soldCount++; } });
-
-  body.innerHTML = `
-    <div class="kpi-grid">
-      <div class="kpi-tile"><div class="kpi-label">Planifiés aujourd'hui</div><div class="kpi-value">${todays.length}</div></div>
-      <div class="kpi-tile"><div class="kpi-label">Visités</div><div class="kpi-value">${visitedCount}<span style="font-size:13px;color:var(--text-muted);">/${todays.length}</span></div></div>
-      <div class="kpi-tile"><div class="kpi-label">Vendus</div><div class="kpi-value">${soldCount}</div></div>
-      <div class="kpi-tile"><div class="kpi-label">Reste à visiter</div><div class="kpi-value">${todays.length-visitedCount}</div></div>
-    </div>
-    ${prospects.length ? `<div class="card" style="border-color:var(--warning-border);background:var(--warning-soft);">
-      <div class="card-title" style="margin-bottom:8px;color:var(--warning);">🆕 Nouveaux prospects à visiter (${prospects.length})</div>
-      <div id="prospect-list"></div>
-    </div>` : ''}
-    ${aValider.length ? `<div class="card" style="border-color:var(--accent-soft-border);background:var(--accent-soft);">
-      <div class="card-title" style="margin-bottom:8px;">⏳ Ventes en attente de création du compte par l'ADV (${aValider.length})</div>
-      <div id="avalider-list"></div>
-    </div>` : ''}
-    <div id="zone-groups"></div>
-    ${!todays.length ? `<div class="card empty-state">Aucun client planifié pour aujourd'hui (${today}). Consultez « Base de données clients » pour voir l'ensemble de votre portefeuille.</div>` : ''}
-  `;
-  if(prospects.length){
-    const pl = body.querySelector('#prospect-list');
-    prospects.forEach(p=>{
-      const row = document.createElement('div'); row.className='client-row';
-      row.innerHTML = `<div class="client-main"><div class="client-name">${escapeHtml(p.nom)}</div>
-        <div class="client-meta">${escapeHtml(p.zone||p.secteur||'')} · ${p.origineProspection==='superviseur'?'signalé par un superviseur':'prospection terrain'}${p.adresse?' · '+escapeHtml(p.adresse):''}</div></div>
-        <span class="status-pill warning">À prospecter</span>`;
-      row.addEventListener('click', ()=>openClientModal(p.id, user));
-      pl.appendChild(row);
-    });
-  }
-  if(aValider.length){
-    const al = body.querySelector('#avalider-list');
-    aValider.forEach(p=>{
-      const row = document.createElement('div'); row.className='client-row';
-      row.innerHTML = `<div class="client-main"><div class="client-name">${escapeHtml(p.nom)}</div>
-        <div class="client-meta">${escapeHtml(p.zone||p.secteur||'')} · vente enregistrée le ${p.venteEnAttenteDate?fmtDateFR(p.venteEnAttenteDate):'—'}, code client en attente</div></div>
-        <span class="status-pill muted">En attente ADV</span>`;
-      row.addEventListener('click', ()=>openClientModal(p.id, user));
-      al.appendChild(row);
-    });
-  }
-  const zg = body.querySelector('#zone-groups');
-  Object.keys(byZone).sort().forEach(zone=>{
-    const wrap = document.createElement('div'); wrap.className='zone-group';
-    wrap.innerHTML = `<div class="zone-title"><span style="width:8px;height:8px;border-radius:50%;background:${clientPrimaryZoneColor(secteurForZone(zone)||zone)};display:inline-block;"></span>${escapeHtml(zone)}<span class="zone-count">${byZone[zone].length}</span></div>`;
-    byZone[zone].forEach(c=>wrap.appendChild(clientRowNode(c, user)));
-    zg.appendChild(wrap);
-  });
-}
-
-function renderTourneeProspecter(body, user){
-  const zones = zonesForSecteur(user.secteur);
-  body.innerHTML = `
-    <div class="banner" style="margin-bottom:14px;">Vous avez repéré un nouveau point de vente ? Enregistrez-le ici. Il apparaît comme prospect dans votre « Historique de prospection » ; dès que vous y enregistrez une première vente, le dossier est transmis à l'ADV, qui crée le compte client définitif (avec un code client).</div>
-    <div class="card" style="max-width:640px;">
-      <div class="form-grid">
-        <label class="field">Nom du commerce<input type="text" id="tp-nom" placeholder="Ex : Boutique Diallo"></label>
-        <label class="field">Zone (quartier)<select id="tp-zone">${zones.map(z=>`<option>${escapeHtml(z)}</option>`).join('')}</select></label>
-        <label class="field">Adresse / repère<input type="text" id="tp-adresse" placeholder="Ex : près du marché"></label>
-        <label class="field">Téléphone<input type="tel" id="tp-tel" placeholder="77 000 00 00"></label>
-      </div>
-      <div class="checkbox-row" style="margin-top:8px;"><input type="checkbox" id="tp-frigo"><label for="tp-frigo">Équipé (ou à équiper) d'un frigo</label></div>
-      <div class="divider"></div>
-      <label class="field">Notes<textarea id="tp-notes" placeholder="Contexte de la prospection…"></textarea></label>
-      <div class="gps-box" style="margin-top:12px;" id="tp-gps">Aucune position capturée. <button class="btn sm" id="tp-gps-btn">${icon('pin')} Capturer ma position</button></div>
-      <button class="btn primary" id="tp-submit" style="margin-top:14px;">${icon('userplus')} Enregistrer ce prospect</button>
-    </div>
-  `;
-  const gps = wireGpsCapture(body, '#tp-gps-btn', '#tp-gps');
-  body.querySelector('#tp-submit').addEventListener('click', async ()=>{
-    if(!APP.db) return;
-    const nom = body.querySelector('#tp-nom').value.trim();
-    if(!nom){ toast('Le nom du commerce est requis.', 'warning'); return; }
-    const zone = body.querySelector('#tp-zone').value;
-    const secteur = user.secteur;
-    const fallback = SECTEUR_FALLBACK_COORD[secteur] || [DAKAR_COORD.lat, DAKAR_COORD.lng];
-    const btn = body.querySelector('#tp-submit'); btn.disabled=true; btn.textContent='Enregistrement…';
-    const payload = {
-      nom, secteur, zone, adresse: body.querySelector('#tp-adresse').value.trim(),
-      telephone: body.querySelector('#tp-tel').value.trim(),
-      aFrigo: body.querySelector('#tp-frigo').checked,
-      joursVisite: [], nombreVisites: null, objectifMensuel: 150000,
-      commercialId: user.id, statut:'prospect', origineProspection:'terrain',
-      notesProspection: body.querySelector('#tp-notes').value.trim(),
-      dateCreation: todayISO(), creePar: user.id,
-      lat: gps.value ? gps.value.lat : fallback[0], lng: gps.value ? gps.value.lng : fallback[1],
-    };
-    try{
-      await APP.db.collection('clients').add(payload);
-      toast('Prospect enregistré. Retrouvez-le dans votre historique de prospection.', 'good');
-      setRoute('#/prospects');
-    }catch(e){ toast('Échec de l\'ajout.', 'critical'); btn.disabled=false; btn.textContent='Enregistrer ce prospect'; }
-  });
 }
 
 function clientRowNode(c, user){
@@ -1241,15 +1209,14 @@ function renderVisitForm(box, c, user, existing, backdrop){
     box.querySelector('#concurrent-select').addEventListener('change', e=>{ concurrentChoisi = e.target.value; });
     box.querySelector('#gps-btn').addEventListener('click', ()=>{
       const btn = box.querySelector('#gps-btn'); btn.disabled = true; btn.textContent='Localisation…';
-      if(!navigator.geolocation){ toast('Géolocalisation indisponible sur cet appareil.', 'warning'); renderInner(); return; }
-      navigator.geolocation.getCurrentPosition(pos=>{
+      getPositionWithFallback(pos=>{
         const dist = Math.round(haversineM(pos.coords.latitude, pos.coords.longitude, c.lat, c.lng));
         gps = {lat: pos.coords.latitude, lng: pos.coords.longitude, distanceM: dist};
         renderInner();
       }, err=>{
         toast('Position indisponible ('+(err.message||'refusée')+'). Vous pouvez continuer sans GPS.', 'warning');
         renderInner();
-      }, {timeout:8000, enableHighAccuracy:true});
+      });
     });
     if(vendu) renderProduitsVendus(); else renderRaison();
     box.querySelector('#submit-visit').addEventListener('click', ()=>submitVisit());
@@ -1308,90 +1275,11 @@ function renderVisitForm(box, c, user, existing, backdrop){
   renderInner();
 }
 
-/* ============================== BASE DE DONNÉES CLIENTS ============================== */
-function renderClientsDB(content, user){
-  const isCommercial = user.role==='commercial';
-  let list = isCommercial ? [...APP.clients.values()].filter(c=>c.commercialId===user.id) : [...APP.clients.values()];
-  content.innerHTML = `
-    ${demoBannerHTML()}
-    <div class="page-head"><div><h1>Base de données clients</h1><p class="page-sub">${list.length} point${list.length>1?'s':''} de vente${isCommercial?' dans votre portefeuille':''}</p></div>
-      <div style="display:flex;gap:8px;flex-wrap:wrap;">
-        ${!isCommercial ? `<select id="filter-commercial"><option value="">Tous les commerciaux</option>${[...APP.profils.values()].filter(p=>p.role==='commercial').map(p=>`<option value="${p.id}">${escapeHtml(p.nom)}</option>`).join('')}</select>` : ''}
-        <select id="filter-secteur"><option value="">Tous les secteurs</option>${SECTEUR_NAMES.map(s=>`<option>${escapeHtml(s)}</option>`).join('')}</select>
-        <select id="filter-statut"><option value="">Statut : tous</option><option value="actif">Actifs</option><option value="a_valider">En attente ADV</option><option value="prospect">Prospects</option></select>
-      </div>
-    </div>
-    ${isCommercial ? `<div class="banner" style="margin-bottom:14px;">Complétez le secteur (auto), la zone, le téléphone, le nombre de visites et les jours de visite de chaque client : tant qu'une information manque, il apparaît « non vérifié » ci-dessous. Cliquez sur une ligne pour compléter.</div>` : ''}
-    <div class="card"><div class="table-wrap"><table>
-      <thead><tr><th>Code</th><th>Client</th><th>Secteur</th><th>Zone</th><th>Téléphone</th><th>Jours visite</th><th>Commercial</th><th>Statut</th></tr></thead>
-      <tbody id="clients-tbody"></tbody>
-    </table></div></div>
-  `;
-  wireDemoBanner(content);
-  function apply(){
-    const com = content.querySelector('#filter-commercial') ? content.querySelector('#filter-commercial').value : '';
-    const sec = content.querySelector('#filter-secteur').value;
-    const st = content.querySelector('#filter-statut').value;
-    const filtered = list.filter(c=> (!com||c.commercialId===com) && (!sec||c.secteur===sec) && (!st||c.statut===st));
-    const tb = content.querySelector('#clients-tbody');
-    tb.innerHTML = filtered.map(c=>{
-      const commercial = APP.profils.get(c.commercialId);
-      let statutPill;
-      if(c.statut==='prospect') statutPill = '<span class="status-pill warning">Prospect</span>';
-      else if(c.statut==='a_valider') statutPill = '<span class="status-pill muted">En attente ADV</span>';
-      else statutPill = isClientVerified(c) ? '<span class="status-pill good">✓ Vérifié</span>' : '<span class="status-pill critical">⚠ Non vérifié</span>';
-      return `<tr data-row="${c.id}" style="cursor:pointer;">
-        <td class="num">${c.code?escapeHtml(c.code):'—'}</td>
-        <td><b>${escapeHtml(c.nom)}</b></td>
-        <td>${c.secteur?escapeHtml(c.secteur):'—'}</td>
-        <td>${c.zone?escapeHtml(c.zone):'—'}</td>
-        <td>${c.telephone?escapeHtml(c.telephone):'—'}</td>
-        <td>${(c.joursVisite&&c.joursVisite.length)?c.joursVisite.join(', '):'—'}</td>
-        <td>${commercial?escapeHtml(commercial.nom):'—'}</td>
-        <td>${statutPill}</td></tr>`;
-    }).join('') || `<tr><td colspan="8" class="empty-state">Aucun client pour ce filtre.</td></tr>`;
-    tb.querySelectorAll('[data-row]').forEach(r=>r.addEventListener('click', ()=>openClientModal(r.getAttribute('data-row'), user)));
-  }
-  content.querySelector('#filter-secteur').addEventListener('change', apply);
-  content.querySelector('#filter-statut').addEventListener('change', apply);
-  const comSel = content.querySelector('#filter-commercial');
-  if(comSel) comSel.addEventListener('change', apply);
-  apply();
-}
+/* ============================== NOUVEAU CLIENT ============================== */
 
-/* ============================== CARTE CLIENTS ============================== */
-function renderClientsCarte(content, user){
-  const isCommercial = user.role==='commercial';
-  let list = isCommercial ? [...myClients(user.id), ...myProspects(user.id), ...myAValider(user.id)]
-    : [...APP.clients.values()].filter(c=>c.statut==='actif'||c.statut==='prospect'||c.statut==='a_valider');
-  content.innerHTML = `
-    ${demoBannerHTML()}
-    <div class="page-head"><div><h1>Carte clients</h1><p class="page-sub">${list.length} point${list.length>1?'s':''} de vente</p></div>
-      <div style="display:flex;gap:8px;flex-wrap:wrap;">
-        <select id="filter-secteur"><option value="">Tous les secteurs</option>${SECTEUR_NAMES.map(s=>`<option>${escapeHtml(s)}</option>`).join('')}</select>
-        <select id="filter-statut"><option value="">Statut : tous</option><option value="actif">Clients actifs</option><option value="prospect">Prospects</option></select>
-        <select id="filter-frigo"><option value="">Frigo : tous</option><option value="1">Avec frigo</option><option value="0">Sans frigo</option></select>
-      </div>
-    </div>
-    <div class="grid-2">
-      <div class="card"><div class="card-title" style="margin-bottom:10px;">Carte du Sénégal</div><div id="senegal-map"></div></div>
-      <div class="card"><div class="card-title" style="margin-bottom:10px;">Carte détaillée — zones</div><div id="zone-map"></div></div>
-    </div>
-  `;
-  wireDemoBanner(content);
-  drawSenegalMap(content.querySelector('#senegal-map'), list);
-  function apply(){
-    const sec = content.querySelector('#filter-secteur').value;
-    const s = content.querySelector('#filter-statut').value;
-    const f = content.querySelector('#filter-frigo').value;
-    let filtered = list.filter(c=> (!sec||c.secteur===sec) && (!s||c.statut===s) && (f===''|| (f==='1'?c.aFrigo:!c.aFrigo)) );
-    drawZoneMap(content.querySelector('#zone-map'), filtered, user);
-  }
-  content.querySelector('#filter-secteur').addEventListener('change', apply);
-  content.querySelector('#filter-statut').addEventListener('change', apply);
-  content.querySelector('#filter-frigo').addEventListener('change', apply);
-  apply();
-}
+
+/* ============================== CLIENTS & CARTE ============================== */
+
 
 /* ---- projection géographique (équirectangulaire, corrigée en latitude) ---- */
 function geoBoundsOf(points){
@@ -1463,131 +1351,6 @@ function drawZoneMap(container, clients, user){
   container.appendChild(legend);
 }
 
-/* ============================== ADV — COMPTES À CRÉER ============================== */
-function renderComptesAValider(content, user){
-  const isAdv = user.role==='adv';
-  content.innerHTML = `
-    ${demoBannerHTML()}
-    <div class="page-head"><div><h1>Comptes à créer</h1><p class="page-sub">${isAdv?'Ventes enregistrées par les commerciaux en attente d\'un code client et de la création du compte (ADV).':'Ventes enregistrées par les commerciaux en attente de la création du compte par l\'ADV (lecture seule).'}</p></div></div>
-    ${isAdv ? `<div class="banner" style="margin-bottom:14px;">Un client passe à l'état « actif » uniquement après qu'un code lui a été attribué ici. Tant qu'aucun code n'est créé, le commercial le voit comme « en attente ».</div>` : ''}
-    <div id="comptes-list"></div>
-  `;
-  wireDemoBanner(content);
-  function apply(){
-    const list = [...APP.clients.values()].filter(c=>c.statut==='a_valider')
-      .sort((a,b)=> (a.venteEnAttenteDate||'') < (b.venteEnAttenteDate||'') ? 1 : -1);
-    const box = content.querySelector('#comptes-list');
-    if(!list.length){ box.innerHTML = `<div class="empty-state">Aucun compte en attente de création pour l'instant.</div>`; return; }
-    box.innerHTML = list.map(c=>{
-      const commercial = APP.profils.get(c.commercialId);
-      const vente = firstSaleFor(c.id);
-      return `<div class="card" style="padding:14px;margin-bottom:12px;" data-card="${c.id}">
-        <div class="card-head" style="margin-bottom:8px;">
-          <div><div class="card-title" style="margin:0;">${escapeHtml(c.nom)}</div>
-            <span class="helptext">${escapeHtml(c.secteur||'—')} · ${escapeHtml(c.zone||'—')} · ${escapeHtml(c.telephone||'—')}</span></div>
-          <span class="status-pill muted">Vente en attente depuis le ${c.venteEnAttenteDate?fmtDateFR(c.venteEnAttenteDate):'—'}</span>
-        </div>
-        <div class="helptext" style="margin-bottom:10px;">
-          Commercial : <b>${commercial?escapeHtml(commercial.nom):'non assigné'}</b>
-          ${c.origineProspection==='superviseur'?' · prospect transmis par le superviseur':' · prospection terrain'}
-          ${vente?` · première vente : ${fmtFCFA(vente.montantTotal)}`:''}
-        </div>
-        ${isAdv ? `<div class="dyn-row">
-          <input type="text" placeholder="Code client (ex : CLTDIV1234)" id="code-input-${c.id}" style="text-transform:uppercase;">
-          <button class="btn primary sm" data-create="${c.id}">${icon('idcard')} Créer le compte</button>
-        </div>` : ''}
-      </div>`;
-    }).join('');
-    if(isAdv) box.querySelectorAll('[data-create]').forEach(btn=>btn.addEventListener('click', async ()=>{
-      const cid = btn.getAttribute('data-create');
-      const input = box.querySelector(`#code-input-${cid}`);
-      const code = input.value.trim().toUpperCase();
-      if(!code){ toast('Saisissez un code client.', 'warning'); return; }
-      const exists = [...APP.clients.values()].some(cl=>cl.id!==cid && cl.code===code);
-      if(exists){ toast('Ce code est déjà utilisé par un autre client.', 'critical'); return; }
-      btn.disabled = true; btn.textContent = 'Création…';
-      try{
-        await APP.db.doc(`clients/${cid}`).update({code, statut:'actif', dateActivation: todayISO(), activePar: user.id});
-        toast('Compte créé — le client est maintenant actif dans la base du commercial.', 'good');
-        apply();
-      }catch(e){ toast('Échec de la création du compte.', 'critical'); btn.disabled=false; btn.textContent='Créer le compte'; }
-    }));
-  }
-  apply();
-}
-
-/* ============================== DIRECTION / ADV — ACTIVITÉ GÉNÉRALE (lecture seule) ============================== */
-function renderActiviteGenerale(content, user){
-  content.innerHTML = `
-    ${demoBannerHTML()}
-    <div class="page-head"><div><h1>Activité générale</h1><p class="page-sub">Vue consolidée du travail des commerciaux et des superviseurs.</p></div>
-      <div style="display:flex;gap:8px;flex-wrap:wrap;">
-        <select id="ag-secteur"><option value="">Tous les secteurs</option>${SECTEUR_NAMES.map(s=>`<option>${escapeHtml(s)}</option>`).join('')}</select>
-        ${dateRangeHTML('ag', periodCutoff(30), todayISO())}
-      </div>
-    </div>
-    <div class="kpi-grid" id="ag-kpis" style="margin-bottom:16px;"></div>
-    <div class="grid-2">
-      <div class="card"><div class="card-title" style="margin-bottom:10px;">Passages commerciaux récents</div><div class="table-wrap" id="ag-visites"></div></div>
-      <div class="card"><div class="card-title" style="margin-bottom:10px;">Fiches superviseurs récentes</div><div class="table-wrap" id="ag-fiches"></div></div>
-    </div>
-  `;
-  wireDemoBanner(content);
-  function apply(from, to){
-    const sinceISO = from!==undefined ? from : (content.querySelector('#ag-from').value||periodCutoff(30));
-    const toISO = to!==undefined ? to : (content.querySelector('#ag-to').value||todayISO());
-    const secteur = content.querySelector('#ag-secteur').value;
-    let visites = filteredVisites({secteur, sinceISO, toISO}).sort((a,b)=> a.date<b.date?1:-1);
-    let fiches = [...APP.fiches.values()].filter(f=>{
-      if(f.date < sinceISO || f.date > toISO) return false;
-      if(secteur){ const c = APP.clients.get(f.clientId); if(!c || c.secteur!==secteur) return false; }
-      return true;
-    }).sort((a,b)=> a.date<b.date?1:-1);
-
-    const vendues = visites.filter(v=>v.statut==='vendu');
-    const ca = vendues.reduce((s,v)=>s+v.montantTotal,0);
-    const clientsScope = secteur ? [...APP.clients.values()].filter(c=>c.secteur===secteur) : [...APP.clients.values()];
-    const actifs = clientsScope.filter(c=>c.statut==='actif');
-    const nonVerifies = actifs.filter(c=>!isClientVerified(c)).length;
-    const enAttente = clientsScope.filter(c=>c.statut==='a_valider').length;
-    const verifTaux = fiches.length ? Math.round(fiches.filter(f=>f.commercialVerifie).length/fiches.length*100) : 0;
-    const nbCommerciaux = new Set(visites.map(v=>v.commercialId)).size;
-    const nbSuperviseurs = new Set(fiches.map(f=>f.superviseurId)).size;
-
-    content.querySelector('#ag-kpis').innerHTML = `
-      <div class="kpi-tile"><div class="kpi-label">Chiffre d'affaires</div><div class="kpi-value">${fmtNum(ca)}</div><div class="kpi-sub">FCFA sur la période</div></div>
-      <div class="kpi-tile"><div class="kpi-label">Passages commerciaux</div><div class="kpi-value">${visites.length}</div><div class="kpi-sub">${nbCommerciaux} commercial(aux) actif(s)</div></div>
-      <div class="kpi-tile"><div class="kpi-label">Fiches superviseurs</div><div class="kpi-value">${fiches.length}</div><div class="kpi-sub">${nbSuperviseurs} superviseur(s)</div></div>
-      <div class="kpi-tile"><div class="kpi-label">Taux de vérification terrain</div><div class="kpi-value">${verifTaux}%</div><div class="kpi-sub">présence commerciale confirmée</div></div>
-      <div class="kpi-tile"><div class="kpi-label">Clients non vérifiés</div><div class="kpi-value">${nonVerifies}</div><div class="kpi-sub">fiche client incomplète</div></div>
-      <div class="kpi-tile"><div class="kpi-label">Comptes en attente</div><div class="kpi-value">${enAttente}</div><div class="kpi-sub">à créer par l'ADV</div></div>
-    `;
-
-    const vBox = content.querySelector('#ag-visites');
-    const vRows = visites.slice(0,60);
-    vBox.innerHTML = vRows.length ? `<table><thead><tr><th>Date</th><th>Commercial</th><th>Client</th><th>Statut</th><th>Montant</th></tr></thead><tbody>
-      ${vRows.map(v=>{ const co=APP.profils.get(v.commercialId); const cl=APP.clients.get(v.clientId);
-        return `<tr data-client="${v.clientId}" style="cursor:pointer;"><td>${fmtDateFR(v.date)}</td><td>${co?escapeHtml(co.nom):'—'}</td><td>${cl?escapeHtml(cl.nom):'—'}</td>
-        <td>${v.statut==='vendu'?'<span class="status-pill good">Vendu</span>':'<span class="status-pill critical">Non vendu</span>'}</td>
-        <td class="num">${v.statut==='vendu'?fmtFCFA(v.montantTotal):'—'}</td></tr>`; }).join('')}
-    </tbody></table>` : `<div class="empty-state">Aucun passage pour cette période / ce secteur.</div>`;
-    vBox.querySelectorAll('[data-client]').forEach(row=>row.addEventListener('click', ()=>openClientModal(row.getAttribute('data-client'), user)));
-
-    const fBox = content.querySelector('#ag-fiches');
-    const fRows = fiches.slice(0,60);
-    fBox.innerHTML = fRows.length ? `<table><thead><tr><th>Date</th><th>Superviseur</th><th>Commercial</th><th>Client</th><th>Mode</th><th>Concurrence</th></tr></thead><tbody>
-      ${fRows.map(f=>{ const sup=APP.profils.get(f.superviseurId); const co=APP.profils.get(f.commercialId); const cl=APP.clients.get(f.clientId);
-        return `<tr data-client="${f.clientId||''}" style="cursor:${f.clientId?'pointer':'default'};"><td>${fmtDateFR(f.date)}</td><td>${sup?escapeHtml(sup.nom):'—'}</td><td>${co?escapeHtml(co.nom):'—'}</td>
-        <td>${cl?escapeHtml(cl.nom):'—'}</td><td>${modeVisiteLabel(f.modeVisite, true)}</td>
-        <td class="helptext" style="max-width:160px;white-space:normal;">${escapeHtml((f.concurrence||'').slice(0,90))||'—'}</td></tr>`; }).join('')}
-    </tbody></table>` : `<div class="empty-state">Aucune fiche pour cette période / ce secteur.</div>`;
-    fBox.querySelectorAll('[data-client]').forEach(row=>{ const cid=row.getAttribute('data-client'); if(cid) row.addEventListener('click', ()=>openClientModal(cid, user)); });
-  }
-  content.querySelector('#ag-secteur').addEventListener('change', ()=>apply());
-  wireDateRange(content, 'ag', apply);
-  apply(periodCutoff(30), todayISO());
-}
-
 /* ============================== TOOLTIP ============================== */
 function getTooltipEl(){
   let t = document.getElementById('chart-tooltip');
@@ -1615,23 +1378,18 @@ function buildProduitsChecklist(container){
   });
   return chosen;
 }
-function buildConcurrentsChecklist(container){
-  const chosen = new Set();
-  CONCURRENTS.forEach(nom=>{
-    const it = document.createElement('div'); it.className='checklist-item'; it.textContent = nom;
-    it.addEventListener('click', ()=>{ if(chosen.has(nom)){chosen.delete(nom);it.classList.remove('on');} else {chosen.add(nom);it.classList.add('on');} });
-    container.appendChild(it);
-  });
-  return chosen;
-}
 function wireGpsCapture(box, btnSel, boxSel){
   let gps = { value: null };
   box.querySelector(btnSel).addEventListener('click', ()=>{
-    if(!navigator.geolocation){ toast('Géolocalisation indisponible.', 'warning'); return; }
-    navigator.geolocation.getCurrentPosition(pos=>{
+    const btn = box.querySelector(btnSel);
+    btn.disabled = true; btn.textContent = 'Localisation…';
+    getPositionWithFallback(pos=>{
       gps.value = {lat:pos.coords.latitude, lng:pos.coords.longitude};
       box.querySelector(boxSel).innerHTML = `<span class="status-pill good">✓ Position capturée</span>`;
-    }, err=>toast('Position indisponible : '+(err.message||'refusée'), 'warning'), {timeout:8000});
+    }, err=>{
+      toast('Position indisponible : '+(err.message||'refusée'), 'warning');
+      btn.disabled = false; btn.textContent = `${icon('pin')} Réessayer`;
+    });
   });
   return gps;
 }
@@ -2104,6 +1862,153 @@ async function exportJournalSuperviseurExcel(user, rows){
   }
 }
 
+/* ============================== PRICING MARCHÉ (SUPERVISEUR) ==============================
+   Le superviseur relève, sur le terrain, le prix pratiqué et le fournisseur d'un produit
+   (le nôtre ou celui d'un concurrent), avec une photo à l'appui. Les photos sont compressées
+   côté navigateur (redimension + JPEG) avant d'être enregistrées, pour rester légères en
+   stockage local comme dans la base connectée. */
+function readAndCompressImage(file, maxDim, quality){
+  return new Promise((resolve)=>{
+    if(!file){ resolve(null); return; }
+    const reader = new FileReader();
+    reader.onload = ()=>{
+      const rawDataUrl = reader.result;
+      let settled = false;
+      const finish = (url)=>{ if(settled) return; settled = true; resolve(url); };
+      try{
+        const img = new Image();
+        img.onload = ()=>{
+          try{
+            let w = img.naturalWidth || img.width, h = img.naturalHeight || img.height;
+            if(!w || !h){ finish(rawDataUrl); return; }
+            if(w > maxDim || h > maxDim){
+              if(w > h){ h = Math.round(h * maxDim / w); w = maxDim; }
+              else { w = Math.round(w * maxDim / h); h = maxDim; }
+            }
+            const canvas = document.createElement('canvas');
+            canvas.width = w; canvas.height = h;
+            const ctx = canvas.getContext('2d');
+            if(!ctx){ finish(rawDataUrl); return; }
+            ctx.drawImage(img, 0, 0, w, h);
+            finish(canvas.toDataURL('image/jpeg', quality));
+          }catch(e){ finish(rawDataUrl); }
+        };
+        img.onerror = ()=>finish(rawDataUrl);
+        img.src = rawDataUrl;
+        setTimeout(()=>finish(rawDataUrl), 1500);
+      }catch(e){ finish(rawDataUrl); }
+    };
+    reader.onerror = ()=>resolve(null);
+    reader.readAsDataURL(file);
+  });
+}
+
+function openPhotoPreviewModal(dataUrl, title){
+  if(!dataUrl) return;
+  const backdrop = document.createElement('div'); backdrop.className='modal-backdrop';
+  backdrop.addEventListener('click', e=>{ if(e.target===backdrop) backdrop.remove(); });
+  backdrop.innerHTML = `<div class="modal" style="max-width:520px;">
+    <div class="modal-head"><h3>${escapeHtml(title||'Photo')}</h3><button class="modal-close" data-close>${icon('x')}</button></div>
+    <img src="${dataUrl}" style="width:100%;border-radius:var(--radius-sm);border:1px solid var(--border);">
+  </div>`;
+  document.body.appendChild(backdrop);
+  backdrop.querySelector('[data-close]').addEventListener('click', ()=>backdrop.remove());
+}
+
+function renderPricing(content, user){
+  content.innerHTML = `
+    ${demoBannerHTML()}
+    <div class="page-head"><div><h1>Pricing marché</h1><p class="page-sub">Prenez en photo un produit (le vôtre ou celui d'un concurrent), et notez le prix observé et le fournisseur / point de vente.</p></div></div>
+    <div class="card" style="max-width:640px;">
+      <div class="card-title">Nouveau relevé</div>
+      <label class="field">Photo du produit<input type="file" id="pz-photo" accept="image/*" capture="environment"></label>
+      <div id="pz-photo-preview" style="margin-top:8px;"></div>
+      <div class="form-grid" style="margin-top:14px;">
+        <label class="field">Produit<input type="text" id="pz-produit" placeholder="Ex : Lait en poudre 1kg"></label>
+        <label class="field">Prix observé (FCFA)<input type="number" min="0" step="5" id="pz-prix" placeholder="Ex : 2500"></label>
+      </div>
+      <label class="field" style="margin-top:12px;">Fournisseur / point de vente<input type="text" id="pz-fournisseur" placeholder="Ex : Grossiste Marché Sandaga"></label>
+      <label class="field" style="margin-top:12px;">Notes<textarea id="pz-notes" placeholder="Contexte, promotion en cours, remarque…"></textarea></label>
+      <div class="gps-box" style="margin-top:12px;" id="pz-gps">Aucune position capturée. <button class="btn sm" id="pz-gps-btn">${icon('pin')} Capturer ma position</button></div>
+      <button class="btn primary" id="pz-submit" style="margin-top:16px;width:100%;justify-content:center;">${icon('camera')} Enregistrer le relevé</button>
+    </div>
+    <div class="card" style="margin-top:18px;">
+      <div class="page-head" style="margin-bottom:12px;">
+        <div><div class="card-title" style="margin:0;">Mes relevés</div></div>
+        ${dateRangeHTML('pz', periodCutoff(60), todayISO())}
+      </div>
+      <div id="pz-list"></div>
+    </div>
+  `;
+  wireDemoBanner(content);
+
+  let photoDataUrl = null;
+  const photoInput = content.querySelector('#pz-photo');
+  const photoPreview = content.querySelector('#pz-photo-preview');
+  photoInput.addEventListener('change', async ()=>{
+    const file = photoInput.files && photoInput.files[0];
+    if(!file) return;
+    photoPreview.innerHTML = `<span class="helptext">Traitement de la photo…</span>`;
+    photoDataUrl = await readAndCompressImage(file, 900, 0.6);
+    photoPreview.innerHTML = photoDataUrl
+      ? `<img src="${photoDataUrl}" class="pricing-photo-preview" id="pz-photo-img">`
+      : `<span class="helptext">Échec de la lecture de la photo — réessayez.</span>`;
+    const imgEl = photoPreview.querySelector('#pz-photo-img');
+    if(imgEl) imgEl.addEventListener('click', ()=>openPhotoPreviewModal(photoDataUrl, 'Photo du produit'));
+  });
+
+  const gps = wireGpsCapture(content, '#pz-gps-btn', '#pz-gps');
+
+  content.querySelector('#pz-submit').addEventListener('click', async ()=>{
+    if(!APP.db) return;
+    const produit = content.querySelector('#pz-produit').value.trim();
+    const prixRaw = content.querySelector('#pz-prix').value;
+    const fournisseur = content.querySelector('#pz-fournisseur').value.trim();
+    if(!produit){ toast('Indiquez le nom du produit.', 'warning'); return; }
+    if(!prixRaw || Number(prixRaw) <= 0){ toast('Indiquez un prix observé.', 'warning'); return; }
+    if(!fournisseur){ toast('Indiquez le fournisseur ou le point de vente.', 'warning'); return; }
+    if(!photoDataUrl){ toast('Ajoutez une photo du produit.', 'warning'); return; }
+    const btn = content.querySelector('#pz-submit'); btn.disabled = true; btn.textContent = 'Enregistrement…';
+    const payload = {
+      superviseurId: user.id, produit, prix: Number(prixRaw), fournisseur,
+      notes: content.querySelector('#pz-notes').value.trim(),
+      photo: photoDataUrl, date: todayISO(), timestamp: new Date().toISOString(), gps: gps.value,
+    };
+    try{
+      await APP.db.collection('relevesPrix').add(payload);
+      toast('Relevé de prix enregistré.', 'good');
+      renderPricing(content, user);
+    }catch(e){ toast('Échec de l\'enregistrement.', 'critical'); btn.disabled = false; btn.textContent = icon('camera')+' Enregistrer le relevé'; }
+  });
+
+  const listBox = content.querySelector('#pz-list');
+  function applyRange(from, to){
+    const mine = [...APP.relevesPrix.values()]
+      .filter(r=>r.superviseurId===user.id && r.date>=from && r.date<=to)
+      .sort((a,b)=> (a.timestamp||'') < (b.timestamp||'') ? 1 : -1);
+    if(!mine.length){ listBox.innerHTML = `<div class="empty-state">Aucun relevé de prix sur cette période.</div>`; return; }
+    listBox.innerHTML = `<div class="table-wrap"><table>
+      <thead><tr><th></th><th>Produit</th><th>Prix</th><th>Fournisseur</th><th>Date</th><th>Notes</th></tr></thead>
+      <tbody>${mine.map(r=>`<tr data-releve="${r.id}">
+        <td>${r.photo ? `<img src="${r.photo}" class="pricing-thumb" data-photo="${r.id}">` : '—'}</td>
+        <td><b>${escapeHtml(r.produit)}</b></td>
+        <td class="num">${fmtNum(r.prix)} FCFA</td>
+        <td>${escapeHtml(r.fournisseur)}</td>
+        <td>${fmtDateFR(r.date)}</td>
+        <td class="helptext">${escapeHtml(r.notes||'—')}</td>
+      </tr>`).join('')}</tbody>
+    </table></div>`;
+    listBox.querySelectorAll('[data-photo]').forEach(im=>{
+      im.addEventListener('click', ()=>{
+        const r = APP.relevesPrix.get(im.getAttribute('data-photo'));
+        if(r) openPhotoPreviewModal(r.photo, r.produit);
+      });
+    });
+  }
+  wireDateRange(content, 'pz', applyRange);
+  applyRange(periodCutoff(60), todayISO());
+}
+
 /* ============================== VUE ÉQUIPE (SUPERVISEUR) ============================== */
 function renderEquipe(content, user){
   const today = todayWeekdayFR();
@@ -2504,6 +2409,533 @@ async function exportExcel(){
   }
 }
 
+
+/* ============================== DIRECTION / PROSPECTION — NOUVELLES FONCTIONS ============================== */
+function myAValider(commercialId){
+  return [...APP.clients.values()].filter(c=>c.commercialId===commercialId && c.statut==='a_valider');
+}
+
+function secteurForZone(zone){
+  return SECTEUR_NAMES.find(s => SECTEURS_DATA[s].zones.includes(zone)) || null;
+}
+
+function zonesForSecteur(secteur){
+  return secteur && SECTEURS_DATA[secteur] ? SECTEURS_DATA[secteur].zones : [];
+}
+
+function secteursForEquipe(user){
+  return [...new Set((user.equipe||[]).map(id=>APP.profils.get(id)).filter(Boolean).map(p=>p.secteur))];
+}
+
+function isClientVerified(c){
+  return !!(c.secteur && c.zone && c.telephone && c.nombreVisites && (c.joursVisite||[]).length);
+}
+
+function firstSaleFor(clientId){
+  const ventes = visitesForClient(clientId).filter(v=>v.statut==='vendu');
+  return ventes.length ? ventes[ventes.length-1] : null;
+}
+
+function renderTourneeAujourdhui(body, user){
+  const today = todayWeekdayFR();
+  const all = myClients(user.id);
+  const todays = all.filter(c => (c.joursVisite||[]).includes(today));
+  const byZone = {};
+  todays.forEach(c=>{ (byZone[c.zone] = byZone[c.zone]||[]).push(c); });
+  const prospects = myProspects(user.id);
+  const aValider = myAValider(user.id);
+
+  let visitedCount = 0, soldCount = 0;
+  todays.forEach(c=>{ const v = visiteToday(c.id, user.id); if(v){ visitedCount++; if(v.statut==='vendu') soldCount++; } });
+
+  body.innerHTML = `
+    <div class="kpi-grid">
+      <div class="kpi-tile"><div class="kpi-label">Planifiés aujourd'hui</div><div class="kpi-value">${todays.length}</div></div>
+      <div class="kpi-tile"><div class="kpi-label">Visités</div><div class="kpi-value">${visitedCount}<span style="font-size:13px;color:var(--text-muted);">/${todays.length}</span></div></div>
+      <div class="kpi-tile"><div class="kpi-label">Vendus</div><div class="kpi-value">${soldCount}</div></div>
+      <div class="kpi-tile"><div class="kpi-label">Reste à visiter</div><div class="kpi-value">${todays.length-visitedCount}</div></div>
+    </div>
+    ${prospects.length ? `<div class="card" style="border-color:var(--warning-border);background:var(--warning-soft);">
+      <div class="card-title" style="margin-bottom:8px;color:var(--warning);">🆕 Nouveaux prospects à visiter (${prospects.length})</div>
+      <div id="prospect-list"></div>
+    </div>` : ''}
+    ${aValider.length ? `<div class="card" style="border-color:var(--accent-soft-border);background:var(--accent-soft);">
+      <div class="card-title" style="margin-bottom:8px;">⏳ Ventes en attente de création du compte par l'ADV (${aValider.length})</div>
+      <div id="avalider-list"></div>
+    </div>` : ''}
+    <div id="zone-groups"></div>
+    ${!todays.length ? `<div class="card empty-state">Aucun client planifié pour aujourd'hui (${today}). Consultez « Base de données clients » pour voir l'ensemble de votre portefeuille.</div>` : ''}
+  `;
+  if(prospects.length){
+    const pl = body.querySelector('#prospect-list');
+    prospects.forEach(p=>{
+      const row = document.createElement('div'); row.className='client-row';
+      row.innerHTML = `<div class="client-main"><div class="client-name">${escapeHtml(p.nom)}</div>
+        <div class="client-meta">${escapeHtml(p.zone||p.secteur||'')} · ${p.origineProspection==='superviseur'?'signalé par un superviseur':'prospection terrain'}${p.adresse?' · '+escapeHtml(p.adresse):''}</div></div>
+        <span class="status-pill warning">À prospecter</span>`;
+      row.addEventListener('click', ()=>openClientModal(p.id, user));
+      pl.appendChild(row);
+    });
+  }
+  if(aValider.length){
+    const al = body.querySelector('#avalider-list');
+    aValider.forEach(p=>{
+      const row = document.createElement('div'); row.className='client-row';
+      row.innerHTML = `<div class="client-main"><div class="client-name">${escapeHtml(p.nom)}</div>
+        <div class="client-meta">${escapeHtml(p.zone||p.secteur||'')} · vente enregistrée le ${p.venteEnAttenteDate?fmtDateFR(p.venteEnAttenteDate):'—'}, code client en attente</div></div>
+        <span class="status-pill muted">En attente ADV</span>`;
+      row.addEventListener('click', ()=>openClientModal(p.id, user));
+      al.appendChild(row);
+    });
+  }
+  const zg = body.querySelector('#zone-groups');
+  Object.keys(byZone).sort().forEach(zone=>{
+    const wrap = document.createElement('div'); wrap.className='zone-group';
+    wrap.innerHTML = `<div class="zone-title"><span style="width:8px;height:8px;border-radius:50%;background:${clientPrimaryZoneColor(secteurForZone(zone)||zone)};display:inline-block;"></span>${escapeHtml(zone)}<span class="zone-count">${byZone[zone].length}</span></div>`;
+    byZone[zone].forEach(c=>wrap.appendChild(clientRowNode(c, user)));
+    zg.appendChild(wrap);
+  });
+}
+
+function renderTourneeProspecter(body, user){
+  const zones = zonesForSecteur(user.secteur);
+  body.innerHTML = `
+    <div class="banner" style="margin-bottom:14px;">Vous avez repéré un nouveau point de vente ? Enregistrez-le ici. Il apparaît comme prospect dans votre « Historique de prospection » ; dès que vous y enregistrez une première vente, le dossier est transmis à l'ADV, qui crée le compte client définitif (avec un code client).</div>
+    <div class="card" style="max-width:640px;">
+      <div class="form-grid">
+        <label class="field">Nom du commerce<input type="text" id="tp-nom" placeholder="Ex : Boutique Diallo"></label>
+        <label class="field">Zone (quartier)<select id="tp-zone">${zones.map(z=>`<option>${escapeHtml(z)}</option>`).join('')}</select></label>
+        <label class="field">Adresse / repère<input type="text" id="tp-adresse" placeholder="Ex : près du marché"></label>
+        <label class="field">Téléphone<input type="tel" id="tp-tel" placeholder="77 000 00 00"></label>
+      </div>
+      <div class="checkbox-row" style="margin-top:8px;"><input type="checkbox" id="tp-frigo"><label for="tp-frigo">Équipé (ou à équiper) d'un frigo</label></div>
+      <div class="divider"></div>
+      <label class="field">Notes<textarea id="tp-notes" placeholder="Contexte de la prospection…"></textarea></label>
+      <div class="gps-box" style="margin-top:12px;" id="tp-gps">Aucune position capturée. <button class="btn sm" id="tp-gps-btn">${icon('pin')} Capturer ma position</button></div>
+      <button class="btn primary" id="tp-submit" style="margin-top:14px;">${icon('userplus')} Enregistrer ce prospect</button>
+    </div>
+  `;
+  const gps = wireGpsCapture(body, '#tp-gps-btn', '#tp-gps');
+  body.querySelector('#tp-submit').addEventListener('click', async ()=>{
+    if(!APP.db) return;
+    const nom = body.querySelector('#tp-nom').value.trim();
+    if(!nom){ toast('Le nom du commerce est requis.', 'warning'); return; }
+    const zone = body.querySelector('#tp-zone').value;
+    const secteur = user.secteur;
+    const fallback = SECTEUR_FALLBACK_COORD[secteur] || [DAKAR_COORD.lat, DAKAR_COORD.lng];
+    const btn = body.querySelector('#tp-submit'); btn.disabled=true; btn.textContent='Enregistrement…';
+    const payload = {
+      nom, secteur, zone, adresse: body.querySelector('#tp-adresse').value.trim(),
+      telephone: body.querySelector('#tp-tel').value.trim(),
+      aFrigo: body.querySelector('#tp-frigo').checked,
+      joursVisite: [], nombreVisites: null, objectifMensuel: 150000,
+      commercialId: user.id, statut:'prospect', origineProspection:'terrain',
+      notesProspection: body.querySelector('#tp-notes').value.trim(),
+      dateCreation: todayISO(), creePar: user.id,
+      lat: gps.value ? gps.value.lat : fallback[0], lng: gps.value ? gps.value.lng : fallback[1],
+    };
+    try{
+      await APP.db.collection('clients').add(payload);
+      toast('Prospect enregistré. Retrouvez-le dans votre historique de prospection.', 'good');
+      setRoute('#/prospects');
+    }catch(e){ toast('Échec de l\'ajout.', 'critical'); btn.disabled=false; btn.textContent='Enregistrer ce prospect'; }
+  });
+}
+
+function renderClientsDB(content, user){
+  const isCommercial = user.role==='commercial';
+  let list = isCommercial ? [...APP.clients.values()].filter(c=>c.commercialId===user.id) : [...APP.clients.values()];
+  content.innerHTML = `
+    ${demoBannerHTML()}
+    <div class="page-head"><div><h1>Base de données clients</h1><p class="page-sub">${list.length} point${list.length>1?'s':''} de vente${isCommercial?' dans votre portefeuille':''}</p></div>
+      <div style="display:flex;gap:8px;flex-wrap:wrap;">
+        ${!isCommercial ? `<select id="filter-commercial"><option value="">Tous les commerciaux</option>${[...APP.profils.values()].filter(p=>p.role==='commercial').map(p=>`<option value="${p.id}">${escapeHtml(p.nom)}</option>`).join('')}</select>` : ''}
+        <select id="filter-secteur"><option value="">Tous les secteurs</option>${SECTEUR_NAMES.map(s=>`<option>${escapeHtml(s)}</option>`).join('')}</select>
+        <select id="filter-statut"><option value="">Statut : tous</option><option value="actif">Actifs</option><option value="a_valider">En attente ADV</option><option value="prospect">Prospects</option></select>
+      </div>
+    </div>
+    ${isCommercial ? `<div class="banner" style="margin-bottom:14px;">Complétez le secteur (auto), la zone, le téléphone, le nombre de visites et les jours de visite de chaque client : tant qu'une information manque, il apparaît « non vérifié » ci-dessous. Cliquez sur une ligne pour compléter.</div>` : ''}
+    <div class="card"><div class="table-wrap"><table>
+      <thead><tr><th>Code</th><th>Client</th><th>Secteur</th><th>Zone</th><th>Téléphone</th><th>Jours visite</th><th>Commercial</th><th>Statut</th></tr></thead>
+      <tbody id="clients-tbody"></tbody>
+    </table></div></div>
+  `;
+  wireDemoBanner(content);
+  function apply(){
+    const com = content.querySelector('#filter-commercial') ? content.querySelector('#filter-commercial').value : '';
+    const sec = content.querySelector('#filter-secteur').value;
+    const st = content.querySelector('#filter-statut').value;
+    const filtered = list.filter(c=> (!com||c.commercialId===com) && (!sec||c.secteur===sec) && (!st||c.statut===st));
+    const tb = content.querySelector('#clients-tbody');
+    tb.innerHTML = filtered.map(c=>{
+      const commercial = APP.profils.get(c.commercialId);
+      let statutPill;
+      if(c.statut==='prospect') statutPill = '<span class="status-pill warning">Prospect</span>';
+      else if(c.statut==='a_valider') statutPill = '<span class="status-pill muted">En attente ADV</span>';
+      else statutPill = isClientVerified(c) ? '<span class="status-pill good">✓ Vérifié</span>' : '<span class="status-pill critical">⚠ Non vérifié</span>';
+      return `<tr data-row="${c.id}" style="cursor:pointer;">
+        <td class="num">${c.code?escapeHtml(c.code):'—'}</td>
+        <td><b>${escapeHtml(c.nom)}</b></td>
+        <td>${c.secteur?escapeHtml(c.secteur):'—'}</td>
+        <td>${c.zone?escapeHtml(c.zone):'—'}</td>
+        <td>${c.telephone?escapeHtml(c.telephone):'—'}</td>
+        <td>${(c.joursVisite&&c.joursVisite.length)?c.joursVisite.join(', '):'—'}</td>
+        <td>${commercial?escapeHtml(commercial.nom):'—'}</td>
+        <td>${statutPill}</td></tr>`;
+    }).join('') || `<tr><td colspan="8" class="empty-state">Aucun client pour ce filtre.</td></tr>`;
+    tb.querySelectorAll('[data-row]').forEach(r=>r.addEventListener('click', ()=>openClientModal(r.getAttribute('data-row'), user)));
+  }
+  content.querySelector('#filter-secteur').addEventListener('change', apply);
+  content.querySelector('#filter-statut').addEventListener('change', apply);
+  const comSel = content.querySelector('#filter-commercial');
+  if(comSel) comSel.addEventListener('change', apply);
+  apply();
+}
+
+function renderClientsCarte(content, user){
+  const isCommercial = user.role==='commercial';
+  let list = isCommercial ? [...myClients(user.id), ...myProspects(user.id), ...myAValider(user.id)]
+    : [...APP.clients.values()].filter(c=>c.statut==='actif'||c.statut==='prospect'||c.statut==='a_valider');
+  content.innerHTML = `
+    ${demoBannerHTML()}
+    <div class="page-head"><div><h1>Carte clients</h1><p class="page-sub">${list.length} point${list.length>1?'s':''} de vente</p></div>
+      <div style="display:flex;gap:8px;flex-wrap:wrap;">
+        <select id="filter-secteur"><option value="">Tous les secteurs</option>${SECTEUR_NAMES.map(s=>`<option>${escapeHtml(s)}</option>`).join('')}</select>
+        <select id="filter-statut"><option value="">Statut : tous</option><option value="actif">Clients actifs</option><option value="prospect">Prospects</option></select>
+        <select id="filter-frigo"><option value="">Frigo : tous</option><option value="1">Avec frigo</option><option value="0">Sans frigo</option></select>
+      </div>
+    </div>
+    <div class="grid-2">
+      <div class="card"><div class="card-title" style="margin-bottom:10px;">Carte du Sénégal</div><div id="senegal-map"></div></div>
+      <div class="card"><div class="card-title" style="margin-bottom:10px;">Carte détaillée — zones</div><div id="zone-map"></div></div>
+    </div>
+  `;
+  wireDemoBanner(content);
+  drawSenegalMap(content.querySelector('#senegal-map'), list);
+  function apply(){
+    const sec = content.querySelector('#filter-secteur').value;
+    const s = content.querySelector('#filter-statut').value;
+    const f = content.querySelector('#filter-frigo').value;
+    let filtered = list.filter(c=> (!sec||c.secteur===sec) && (!s||c.statut===s) && (f===''|| (f==='1'?c.aFrigo:!c.aFrigo)) );
+    drawZoneMap(content.querySelector('#zone-map'), filtered, user);
+  }
+  content.querySelector('#filter-secteur').addEventListener('change', apply);
+  content.querySelector('#filter-statut').addEventListener('change', apply);
+  content.querySelector('#filter-frigo').addEventListener('change', apply);
+  apply();
+}
+
+function renderComptesAValider(content, user){
+  const isAdv = user.role==='adv';
+  content.innerHTML = `
+    ${demoBannerHTML()}
+    <div class="page-head"><div><h1>Comptes à créer</h1><p class="page-sub">${isAdv?'Ventes enregistrées par les commerciaux en attente d\'un code client et de la création du compte (ADV).':'Ventes enregistrées par les commerciaux en attente de la création du compte par l\'ADV (lecture seule).'}</p></div></div>
+    ${isAdv ? `<div class="banner" style="margin-bottom:14px;">Un client passe à l'état « actif » uniquement après qu'un code lui a été attribué ici. Tant qu'aucun code n'est créé, le commercial le voit comme « en attente ».</div>` : ''}
+    <div id="comptes-list"></div>
+  `;
+  wireDemoBanner(content);
+  function apply(){
+    const list = [...APP.clients.values()].filter(c=>c.statut==='a_valider')
+      .sort((a,b)=> (a.venteEnAttenteDate||'') < (b.venteEnAttenteDate||'') ? 1 : -1);
+    const box = content.querySelector('#comptes-list');
+    if(!list.length){ box.innerHTML = `<div class="empty-state">Aucun compte en attente de création pour l'instant.</div>`; return; }
+    box.innerHTML = list.map(c=>{
+      const commercial = APP.profils.get(c.commercialId);
+      const vente = firstSaleFor(c.id);
+      return `<div class="card" style="padding:14px;margin-bottom:12px;" data-card="${c.id}">
+        <div class="card-head" style="margin-bottom:8px;">
+          <div><div class="card-title" style="margin:0;">${escapeHtml(c.nom)}</div>
+            <span class="helptext">${escapeHtml(c.secteur||'—')} · ${escapeHtml(c.zone||'—')} · ${escapeHtml(c.telephone||'—')}</span></div>
+          <span class="status-pill muted">Vente en attente depuis le ${c.venteEnAttenteDate?fmtDateFR(c.venteEnAttenteDate):'—'}</span>
+        </div>
+        <div class="helptext" style="margin-bottom:10px;">
+          Commercial : <b>${commercial?escapeHtml(commercial.nom):'non assigné'}</b>
+          ${c.origineProspection==='superviseur'?' · prospect transmis par le superviseur':' · prospection terrain'}
+          ${vente?` · première vente : ${fmtFCFA(vente.montantTotal)}`:''}
+        </div>
+        ${isAdv ? `<div class="dyn-row">
+          <input type="text" placeholder="Code client (ex : CLTDIV1234)" id="code-input-${c.id}" style="text-transform:uppercase;">
+          <button class="btn primary sm" data-create="${c.id}">${icon('idcard')} Créer le compte</button>
+        </div>` : ''}
+      </div>`;
+    }).join('');
+    if(isAdv) box.querySelectorAll('[data-create]').forEach(btn=>btn.addEventListener('click', async ()=>{
+      const cid = btn.getAttribute('data-create');
+      const input = box.querySelector(`#code-input-${cid}`);
+      const code = input.value.trim().toUpperCase();
+      if(!code){ toast('Saisissez un code client.', 'warning'); return; }
+      const exists = [...APP.clients.values()].some(cl=>cl.id!==cid && cl.code===code);
+      if(exists){ toast('Ce code est déjà utilisé par un autre client.', 'critical'); return; }
+      btn.disabled = true; btn.textContent = 'Création…';
+      try{
+        await APP.db.doc(`clients/${cid}`).update({code, statut:'actif', dateActivation: todayISO(), activePar: user.id});
+        toast('Compte créé — le client est maintenant actif dans la base du commercial.', 'good');
+        apply();
+      }catch(e){ toast('Échec de la création du compte.', 'critical'); btn.disabled=false; btn.textContent='Créer le compte'; }
+    }));
+  }
+  apply();
+}
+
+function renderActiviteGenerale(content, user){
+  content.innerHTML = `
+    ${demoBannerHTML()}
+    <div class="page-head"><div><h1>Activité générale</h1><p class="page-sub">Vue consolidée du travail des commerciaux et des superviseurs.</p></div>
+      <div style="display:flex;gap:8px;flex-wrap:wrap;">
+        <select id="ag-secteur"><option value="">Tous les secteurs</option>${SECTEUR_NAMES.map(s=>`<option>${escapeHtml(s)}</option>`).join('')}</select>
+        ${dateRangeHTML('ag', periodCutoff(30), todayISO())}
+      </div>
+    </div>
+    <div class="kpi-grid" id="ag-kpis" style="margin-bottom:16px;"></div>
+    <div class="grid-2">
+      <div class="card"><div class="card-title" style="margin-bottom:10px;">Passages commerciaux récents</div><div class="table-wrap" id="ag-visites"></div></div>
+      <div class="card"><div class="card-title" style="margin-bottom:10px;">Fiches superviseurs récentes</div><div class="table-wrap" id="ag-fiches"></div></div>
+    </div>
+  `;
+  wireDemoBanner(content);
+  function apply(from, to){
+    const sinceISO = from!==undefined ? from : (content.querySelector('#ag-from').value||periodCutoff(30));
+    const toISO = to!==undefined ? to : (content.querySelector('#ag-to').value||todayISO());
+    const secteur = content.querySelector('#ag-secteur').value;
+    let visites = filteredVisites({secteur, sinceISO, toISO}).sort((a,b)=> a.date<b.date?1:-1);
+    let fiches = [...APP.fiches.values()].filter(f=>{
+      if(f.date < sinceISO || f.date > toISO) return false;
+      if(secteur){ const c = APP.clients.get(f.clientId); if(!c || c.secteur!==secteur) return false; }
+      return true;
+    }).sort((a,b)=> a.date<b.date?1:-1);
+
+    const vendues = visites.filter(v=>v.statut==='vendu');
+    const ca = vendues.reduce((s,v)=>s+v.montantTotal,0);
+    const clientsScope = secteur ? [...APP.clients.values()].filter(c=>c.secteur===secteur) : [...APP.clients.values()];
+    const actifs = clientsScope.filter(c=>c.statut==='actif');
+    const nonVerifies = actifs.filter(c=>!isClientVerified(c)).length;
+    const enAttente = clientsScope.filter(c=>c.statut==='a_valider').length;
+    const verifTaux = fiches.length ? Math.round(fiches.filter(f=>f.commercialVerifie).length/fiches.length*100) : 0;
+    const nbCommerciaux = new Set(visites.map(v=>v.commercialId)).size;
+    const nbSuperviseurs = new Set(fiches.map(f=>f.superviseurId)).size;
+
+    content.querySelector('#ag-kpis').innerHTML = `
+      <div class="kpi-tile"><div class="kpi-label">Chiffre d'affaires</div><div class="kpi-value">${fmtNum(ca)}</div><div class="kpi-sub">FCFA sur la période</div></div>
+      <div class="kpi-tile"><div class="kpi-label">Passages commerciaux</div><div class="kpi-value">${visites.length}</div><div class="kpi-sub">${nbCommerciaux} commercial(aux) actif(s)</div></div>
+      <div class="kpi-tile"><div class="kpi-label">Fiches superviseurs</div><div class="kpi-value">${fiches.length}</div><div class="kpi-sub">${nbSuperviseurs} superviseur(s)</div></div>
+      <div class="kpi-tile"><div class="kpi-label">Taux de vérification terrain</div><div class="kpi-value">${verifTaux}%</div><div class="kpi-sub">présence commerciale confirmée</div></div>
+      <div class="kpi-tile"><div class="kpi-label">Clients non vérifiés</div><div class="kpi-value">${nonVerifies}</div><div class="kpi-sub">fiche client incomplète</div></div>
+      <div class="kpi-tile"><div class="kpi-label">Comptes en attente</div><div class="kpi-value">${enAttente}</div><div class="kpi-sub">à créer par l'ADV</div></div>
+    `;
+
+    const vBox = content.querySelector('#ag-visites');
+    const vRows = visites.slice(0,60);
+    vBox.innerHTML = vRows.length ? `<table><thead><tr><th>Date</th><th>Commercial</th><th>Client</th><th>Statut</th><th>Montant</th></tr></thead><tbody>
+      ${vRows.map(v=>{ const co=APP.profils.get(v.commercialId); const cl=APP.clients.get(v.clientId);
+        return `<tr data-client="${v.clientId}" style="cursor:pointer;"><td>${fmtDateFR(v.date)}</td><td>${co?escapeHtml(co.nom):'—'}</td><td>${cl?escapeHtml(cl.nom):'—'}</td>
+        <td>${v.statut==='vendu'?'<span class="status-pill good">Vendu</span>':'<span class="status-pill critical">Non vendu</span>'}</td>
+        <td class="num">${v.statut==='vendu'?fmtFCFA(v.montantTotal):'—'}</td></tr>`; }).join('')}
+    </tbody></table>` : `<div class="empty-state">Aucun passage pour cette période / ce secteur.</div>`;
+    vBox.querySelectorAll('[data-client]').forEach(row=>row.addEventListener('click', ()=>openClientModal(row.getAttribute('data-client'), user)));
+
+    const fBox = content.querySelector('#ag-fiches');
+    const fRows = fiches.slice(0,60);
+    fBox.innerHTML = fRows.length ? `<table><thead><tr><th>Date</th><th>Superviseur</th><th>Commercial</th><th>Client</th><th>Mode</th><th>Concurrence</th></tr></thead><tbody>
+      ${fRows.map(f=>{ const sup=APP.profils.get(f.superviseurId); const co=APP.profils.get(f.commercialId); const cl=APP.clients.get(f.clientId);
+        return `<tr data-client="${f.clientId||''}" style="cursor:${f.clientId?'pointer':'default'};"><td>${fmtDateFR(f.date)}</td><td>${sup?escapeHtml(sup.nom):'—'}</td><td>${co?escapeHtml(co.nom):'—'}</td>
+        <td>${cl?escapeHtml(cl.nom):'—'}</td><td>${modeVisiteLabel(f.modeVisite, true)}</td>
+        <td class="helptext" style="max-width:160px;white-space:normal;">${escapeHtml((f.concurrence||'').slice(0,90))||'—'}</td></tr>`; }).join('')}
+    </tbody></table>` : `<div class="empty-state">Aucune fiche pour cette période / ce secteur.</div>`;
+    fBox.querySelectorAll('[data-client]').forEach(row=>{ const cid=row.getAttribute('data-client'); if(cid) row.addEventListener('click', ()=>openClientModal(cid, user)); });
+  }
+  content.querySelector('#ag-secteur').addEventListener('change', ()=>apply());
+  wireDateRange(content, 'ag', apply);
+  apply(periodCutoff(30), todayISO());
+}
+
+/* ============================== SUIVI DES SUPERVISEURS (DIRECTION) ============================== */
+function renderSuiviSuperviseurs(content, user){
+  const superviseurs = [...APP.profils.values()].filter(p=>p.role==='superviseur').sort((a,b)=> a.nom<b.nom?-1:1);
+  content.innerHTML = `
+    ${demoBannerHTML()}
+    <div class="page-head">
+      <div><h1>Suivi des superviseurs</h1><p class="page-sub">Ce que fait chaque superviseur sur le terrain : fiches renseignées, accompagnement des commerciaux, prospection, dernière activité.</p></div>
+      <div style="display:flex;gap:8px;flex-wrap:wrap;">${dateRangeHTML('sv', periodCutoff(30), todayISO())}</div>
+    </div>
+    <div class="kpi-grid" id="sv-kpis" style="margin-bottom:16px;"></div>
+    <div id="sv-cards" class="grid-2"></div>
+  `;
+  wireDemoBanner(content);
+
+  function apply(from, to){
+    const sinceISO = from!==undefined ? from : (content.querySelector('#sv-from').value||periodCutoff(30));
+    const toISO = to!==undefined ? to : (content.querySelector('#sv-to').value||todayISO());
+
+    const rows = superviseurs.map(sup=>{
+      const allFiches = fichesForSuperviseur(sup.id); // déjà trié du plus récent au plus ancien
+      const periodFiches = allFiches.filter(f=>f.date>=sinceISO && f.date<=toISO);
+      const avec = periodFiches.filter(f=>(f.modeVisite||'').startsWith('avec_commercial')).length;
+      const seul = periodFiches.length - avec;
+      const prospects = periodFiches.reduce((s,f)=>s+(f.clientsProspectes||[]).length, 0);
+      const verifies = periodFiches.filter(f=>f.commercialVerifie).length;
+      const lastDate = allFiches.length ? allFiches[0].date : null;
+      const daysSince = lastDate ? daysBetween(lastDate, todayISO()) : null;
+      const equipe = (sup.equipe||[]).map(id=>APP.profils.get(id)).filter(Boolean);
+      const secteurs = [...new Set(equipe.map(c=>c.secteur).filter(Boolean))];
+      return { sup, periodFiches, avec, seul, prospects, verifies, lastDate, daysSince, equipeSize: equipe.length, secteurs };
+    }).sort((a,b)=> (b.daysSince==null?9999:b.daysSince) - (a.daysSince==null?9999:a.daysSince));
+
+    const totalFiches = rows.reduce((s,r)=>s+r.periodFiches.length, 0);
+    const totalVerifies = rows.reduce((s,r)=>s+r.verifies, 0);
+    const totalProspects = rows.reduce((s,r)=>s+r.prospects, 0);
+    const actifs = rows.filter(r=>r.periodFiches.length>0).length;
+    const enRetard = rows.filter(r=>r.daysSince==null || r.daysSince>7).length;
+    const verifTaux = totalFiches ? Math.round(totalVerifies/totalFiches*100) : 0;
+
+    content.querySelector('#sv-kpis').innerHTML = `
+      <div class="kpi-tile"><div class="kpi-label">Fiches sur la période</div><div class="kpi-value">${totalFiches}</div><div class="kpi-sub">${actifs}/${rows.length} superviseur(s) actif(s)</div></div>
+      <div class="kpi-tile"><div class="kpi-label">Taux de vérification terrain</div><div class="kpi-value">${verifTaux}%</div><div class="kpi-sub">présence commerciale confirmée</div></div>
+      <div class="kpi-tile"><div class="kpi-label">Prospects transmis</div><div class="kpi-value">${totalProspects}</div><div class="kpi-sub">sur la période</div></div>
+      <div class="kpi-tile"><div class="kpi-label">Sans activité +7 jours</div><div class="kpi-value">${enRetard}</div><div class="kpi-sub">à relancer</div></div>
+    `;
+
+    const wrap = content.querySelector('#sv-cards');
+    wrap.innerHTML = '';
+    if(!rows.length){ wrap.innerHTML = `<div class="empty-state">Aucun superviseur enregistré.</div>`; return; }
+    rows.forEach(r=>{
+      const card = document.createElement('div'); card.className = 'card';
+      const lastBadge = !r.lastDate
+        ? `<div class="status-pill critical" style="display:inline-flex;">✗ Aucune fiche enregistrée</div>`
+        : r.daysSince>7
+          ? `<div class="status-pill warning" style="display:inline-flex;">⚠ Dernière fiche il y a ${r.daysSince} jours (${fmtDateFR(r.lastDate)})</div>`
+          : `<div class="status-pill good" style="display:inline-flex;">✓ Dernière fiche ${r.daysSince===0?"aujourd'hui":r.daysSince===1?'hier':'il y a '+r.daysSince+' jours'}</div>`;
+      card.innerHTML = `
+        <div class="card-head"><div style="display:flex;align-items:center;gap:8px;"><div class="avatar">${initials(r.sup.nom)}</div>
+          <div><div class="card-title" style="margin:0;">${escapeHtml(r.sup.nom)}</div>
+            <span class="helptext">${r.equipeSize} commercial${r.equipeSize>1?'aux':''} encadré${r.equipeSize>1?'s':''}${r.secteurs.length?' · '+r.secteurs.map(escapeHtml).join(', '):''}</span></div></div>
+          <button class="btn ghost sm" data-hist="${r.sup.id}">${icon('history')} Historique</button>
+        </div>
+        <div class="kpi-grid" style="grid-template-columns:repeat(3,1fr);margin-bottom:10px;">
+          <div class="kpi-tile"><div class="kpi-label">Fiches (période)</div><div class="kpi-value">${r.periodFiches.length}</div></div>
+          <div class="kpi-tile"><div class="kpi-label">Avec / seul</div><div class="kpi-value" style="font-size:16px;">${r.avec} / ${r.seul}</div></div>
+          <div class="kpi-tile"><div class="kpi-label">Prospects transmis</div><div class="kpi-value">${r.prospects}</div></div>
+        </div>
+        ${lastBadge}
+      `;
+      wrap.appendChild(card);
+    });
+    wrap.querySelectorAll('[data-hist]').forEach(btn=>btn.addEventListener('click', ()=>openSuperviseurHistoryModal(btn.getAttribute('data-hist'), user)));
+  }
+  wireDateRange(content, 'sv', apply);
+  apply(periodCutoff(30), todayISO());
+}
+
+function openSuperviseurHistoryModal(superviseurId, viewerUser){
+  const sup = APP.profils.get(superviseurId);
+  if(!sup) return;
+  const backdrop = document.createElement('div'); backdrop.className='modal-backdrop';
+  backdrop.addEventListener('click', e=>{ if(e.target===backdrop) backdrop.remove(); });
+  const mineAll = fichesForSuperviseur(superviseurId); // déjà trié du plus récent au plus ancien
+  const allDatesDesc = [...new Set(mineAll.map(f=>f.date))];
+  const earliest = allDatesDesc.length ? allDatesDesc[allDatesDesc.length-1] : periodCutoff(30);
+  backdrop.innerHTML = `<div class="modal" style="max-width:920px;">
+    <div class="modal-head">
+      <div><h3>Historique — ${escapeHtml(sup.nom)}</h3>
+        <p class="page-sub">${(sup.equipe||[]).length} commercial(aux) encadré(s)</p></div>
+      <button class="modal-close" data-close>${icon('x')}</button>
+    </div>
+    <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:14px;" id="shist-sub-row">
+      <p class="helptext" id="shist-sub" style="margin:0;flex:1;"></p>
+      ${dateRangeHTML('shist', earliest, todayISO())}
+    </div>
+    <div class="grid-2" style="grid-template-columns:220px 1fr;align-items:start;">
+      <div class="card" style="padding:10px;">
+        <div class="card-title" style="padding:4px 6px 8px;">Journées</div>
+        <div id="shist-date-list" style="max-height:420px;overflow-y:auto;"></div>
+      </div>
+      <div class="card" id="shist-detail"></div>
+    </div>
+  </div>`;
+  document.body.appendChild(backdrop);
+  backdrop.querySelector('[data-close]').addEventListener('click', ()=>backdrop.remove());
+
+  const listBox = backdrop.querySelector('#shist-date-list');
+  let mine = mineAll, dates = allDatesDesc.slice();
+  let selected = dates[0] || todayISO();
+  function applyRange(from, to){
+    mine = mineAll.filter(f=>f.date>=from && f.date<=to);
+    dates = [...new Set(mine.map(f=>f.date))].sort((a,b)=> a<b?1:-1);
+    backdrop.querySelector('#shist-sub').textContent = `${dates.length} journée${dates.length>1?'s':''} avec au moins une fiche enregistrée sur la période choisie.`;
+    if(!dates.includes(selected)) selected = dates[0] || todayISO();
+    renderList(); renderDetail();
+  }
+  wireDateRange(backdrop, 'shist', applyRange);
+  function renderList(){
+    if(!dates.length){ listBox.innerHTML = `<div class="empty-state">Aucune fiche sur cette période.</div>`; return; }
+    listBox.innerHTML = dates.map(d=>{
+      const day = mine.filter(f=>f.date===d);
+      return `<div class="nav-item ${d===selected?'active':''}" data-date="${d}" style="flex-direction:column;align-items:flex-start;gap:2px;">
+        <span>${fmtDateFR(d)}</span><span class="helptext" style="margin:0;">${day.length} fiche${day.length>1?'s':''}</span>
+      </div>`;
+    }).join('');
+    listBox.querySelectorAll('[data-date]').forEach(el=>el.addEventListener('click', ()=>{ selected = el.getAttribute('data-date'); renderList(); renderDetail(); }));
+  }
+  function renderDetail(){
+    const box = backdrop.querySelector('#shist-detail');
+    if(!selected){ box.innerHTML = `<div class="empty-state">Sélectionnez une journée.</div>`; return; }
+    const day = mine.filter(f=>f.date===selected);
+    box.innerHTML = `
+      <div class="card-head">
+        <div><div class="card-title" style="margin:0;">Fiches du ${fmtDateFR(selected)}</div>
+          <span class="helptext">${day.length} fiche${day.length>1?'s':''} ce jour-là</span></div>
+      </div>
+      <div class="table-wrap"><table><thead><tr><th>Mode</th><th>Commercial</th><th>Client / prospect</th><th>Vérifié</th><th>Prospects</th><th>Concurrence</th><th>Notes</th></tr></thead><tbody>
+        ${day.map(f=>{ const co=APP.profils.get(f.commercialId); const cl=APP.clients.get(f.clientId);
+          const cible = cl ? escapeHtml(cl.nom) : ((f.clientsProspectes&&f.clientsProspectes[0]) ? escapeHtml(f.clientsProspectes[0].nom) : '—');
+          return `<tr><td>${modeVisiteLabel(f.modeVisite, true)}</td><td>${co?escapeHtml(co.nom):'—'}</td><td>${cible}</td>
+          <td>${f.commercialVerifie?'<span class="status-pill good">✓</span>':'<span class="status-pill muted">—</span>'}</td>
+          <td class="num">${(f.clientsProspectes||[]).length}</td>
+          <td class="helptext" style="max-width:140px;white-space:normal;">${escapeHtml((f.concurrence||'').slice(0,80))||'—'}</td>
+          <td class="helptext" style="max-width:180px;white-space:normal;">${escapeHtml((f.notes||'').slice(0,100))||'—'}</td></tr>`;
+        }).join('') || `<tr><td colspan="7" class="empty-state">Aucune fiche ce jour-là.</td></tr>`}
+      </tbody></table></div>
+    `;
+  }
+  applyRange(earliest, todayISO());
+}
+
+/* ============================== NOUVELLES FONCTIONS (ADV / plages de dates / etc.) ============================== */
+function dateRangeHTML(idPrefix, fromISO, toISO){
+  return `<div class="date-range" style="display:flex;align-items:center;gap:6px;">
+    <input type="date" id="${idPrefix}-from" value="${fromISO||''}" max="${todayISO()}" title="Du">
+    <span class="helptext" style="margin:0;">→</span>
+    <input type="date" id="${idPrefix}-to" value="${toISO||''}" max="${todayISO()}" title="Au">
+  </div>`;
+}
+
+function wireDateRange(container, idPrefix, onChange){
+  const fromEl = container.querySelector('#'+idPrefix+'-from');
+  const toEl = container.querySelector('#'+idPrefix+'-to');
+  function apply(){
+    let from = fromEl.value, to = toEl.value;
+    if(from && to && from > to){ toEl.value = from; to = from; }
+    onChange(from || '2000-01-01', to || todayISO());
+  }
+  fromEl.addEventListener('change', apply);
+  toEl.addEventListener('change', apply);
+}
+
+function routeAllowed(user, route){
+  return navFor(user).some(it=>it.r===route);
+}
+
+function buildConcurrentsChecklist(container){
+  const chosen = new Set();
+  CONCURRENTS.forEach(nom=>{
+    const it = document.createElement('div'); it.className='checklist-item'; it.textContent = nom;
+    it.addEventListener('click', ()=>{ if(chosen.has(nom)){chosen.delete(nom);it.classList.remove('on');} else {chosen.add(nom);it.classList.add('on');} });
+    container.appendChild(it);
+  });
+  return chosen;
+}
+
 /* ============================== BOOT ============================== */
 boot();
 </script>
+</body>
+</html>
