@@ -502,7 +502,7 @@ async function boot(){
     APP.dbReady = true;
     subscribeCollection('profils', APP.profils);
     subscribeCollection('produits', APP.produits);
-    subscribeCollection('clients', APP.clients);
+    subscribeCollection('clients_rtm', APP.clients);
     subscribeCollection('visites', APP.visites, {orderBy:'date', limit:600});
     subscribeCollection('fichesSuperviseur', APP.fiches, {orderBy:'date', limit:300});
     subscribeCollection('relevesPrix', APP.relevesPrix, {orderBy:'date', limit:300});
@@ -1197,14 +1197,14 @@ function openClientModal(clientId, user){
         nombreVisites: Number(box.querySelector('#ci-nb').value)||0,
         joursVisite: [...joursSet],
       };
-      try{ await APP.db.doc(`clients/${clientId}`).update(payload); toast('Informations client mises à jour.', 'good'); backdrop.remove(); }
+      try{ await APP.db.doc(`clients_rtm/${clientId}`).update(payload); toast('Informations client mises à jour.', 'good'); backdrop.remove(); }
       catch(e){ toast('Échec de la mise à jour.', 'critical'); }
     });
   });
   const toggleFrigoBtn = backdrop.querySelector('#toggle-frigo');
   if(toggleFrigoBtn) toggleFrigoBtn.addEventListener('click', async ()=>{
     if(!APP.db) return;
-    try{ await APP.db.doc(`clients/${clientId}`).update({aFrigo: !c.aFrigo}); toast('Statut frigo mis à jour.', 'good'); backdrop.remove(); }
+    try{ await APP.db.doc(`clients_rtm/${clientId}`).update({aFrigo: !c.aFrigo}); toast('Statut frigo mis à jour.', 'good'); backdrop.remove(); }
     catch(e){ toast('Échec de la mise à jour.', 'critical'); }
   });
   if(canRecordVisit) renderVisitForm(backdrop.querySelector('#visit-form-body'), c, user, existingToday, backdrop);
@@ -1303,7 +1303,7 @@ function renderVisitForm(box, c, user, existing, backdrop){
     try{
       await APP.db.collection('visites').add(payload);
       if(vendu && (c.statut==='prospect' || c.statut==='a_valider')){
-        try{ await APP.db.doc(`clients/${c.id}`).update({statut:'a_valider', venteEnAttenteDate: todayISO()}); toast('Vente enregistrée — en attente de création du compte par l\'ADV.', 'good'); }
+        try{ await APP.db.doc(`clients_rtm/${c.id}`).update({statut:'a_valider', venteEnAttenteDate: todayISO()}); toast('Vente enregistrée — en attente de création du compte par l\'ADV.', 'good'); }
         catch(e){ toast('Passage enregistré.', 'good'); }
       } else {
         toast('Passage enregistré.', 'good');
@@ -1588,7 +1588,7 @@ function renderAvecProspect(box, content, user, commercialId){
       lat: gps.value ? gps.value.lat : fallback[0], lng: gps.value ? gps.value.lng : fallback[1],
     };
     try{
-      const ref = await APP.db.collection('clients').add(clientPayload);
+      const ref = await APP.db.collection('clients_rtm').add(clientPayload);
       await APP.db.collection('fichesSuperviseur').add({
         superviseurId: user.id, commercialId, clientId: ref.id, date: todayISO(),
         modeVisite:'avec_commercial_prospection', produitsPresents: [], commercialVerifie: true,
@@ -1734,7 +1734,7 @@ function renderSansProspect(box, content, user){
       lat: gps.value ? gps.value.lat : fallback[0], lng: gps.value ? gps.value.lng : fallback[1],
     };
     try{
-      const ref = await APP.db.collection('clients').add(clientPayload);
+      const ref = await APP.db.collection('clients_rtm').add(clientPayload);
       await APP.db.collection('fichesSuperviseur').add({
         superviseurId: user.id, commercialId: responsable ? responsable.id : null, clientId: ref.id, date: todayISO(),
         modeVisite:'seul_prospection', produitsPresents: [], commercialVerifie: false,
@@ -2574,7 +2574,7 @@ function renderTourneeProspecter(body, user){
       lat: gps.value ? gps.value.lat : fallback[0], lng: gps.value ? gps.value.lng : fallback[1],
     };
     try{
-      await APP.db.collection('clients').add(payload);
+      await APP.db.collection('clients_rtm').add(payload);
       toast('Prospect enregistré. Retrouvez-le dans votre historique de prospection.', 'good');
       setRoute('#/prospects');
     }catch(e){ toast('Échec de l\'ajout.', 'critical'); btn.disabled=false; btn.textContent='Enregistrer ce prospect'; }
@@ -2707,7 +2707,7 @@ function renderComptesAValider(content, user){
       if(exists){ toast('Ce code est déjà utilisé par un autre client.', 'critical'); return; }
       btn.disabled = true; btn.textContent = 'Création…';
       try{
-        await APP.db.doc(`clients/${cid}`).update({code, statut:'actif', dateActivation: todayISO(), activePar: user.id});
+        await APP.db.doc(`clients_rtm/${cid}`).update({code, statut:'actif', dateActivation: todayISO(), activePar: user.id});
         toast('Compte créé — le client est maintenant actif dans la base du commercial.', 'good');
         apply();
       }catch(e){ toast('Échec de la création du compte.', 'critical'); btn.disabled=false; btn.textContent='Créer le compte'; }
