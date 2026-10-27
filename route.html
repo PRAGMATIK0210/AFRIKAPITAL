@@ -409,7 +409,7 @@ function printQrImage(dataUrl, nom, code){
     <img src="${dataUrl}" alt="QR code">
     <h2>${escapeHtml(nom||'')}</h2>
     <p>${code?escapeHtml(code):''}</p>
-    <script>window.onload = function(){ setTimeout(function(){ window.print(); }, 200); };</script>
+    <script>window.onload = function(){ setTimeout(function(){ window.print(); }, 200); };<\/script>
     </body></html>`);
   w.document.close();
 }
