@@ -7,6 +7,8 @@
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Public+Sans:wght@400;500;600;700;800&family=IBM+Plex+Mono:wght@500;600&display=swap">
 <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
+<!-- Génération des QR codes clients -->
+<script src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js"></script>
 <!-- Supabase (base de données partagée, en temps réel, entre tous les utilisateurs) -->
 <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
 </head>
@@ -368,7 +370,78 @@ const APP = {
   profils: new Map(), clients: new Map(), produits: new Map(), visites: new Map(), fiches: new Map(), relevesPrix: new Map(),
   currentUser: null,
   route: null,
+  qrPreselect: null, // {clientId, commercialId} défini par handleQrScan(), consommé une fois par renderFiche()
 };
+
+/* ============================== QR CODES CLIENTS ============================== */
+// URL de rattachement d'un client : scannée par l'appareil photo natif du téléphone,
+// elle ouvre directement l'application sur la route dynamique "#/qr/<clientId>".
+function qrUrlForClient(clientId){
+  return location.origin + location.pathname + '#/qr/' + encodeURIComponent(clientId);
+}
+// Génère un QR code (PNG en data URL) pour un texte donné. Résout avec '' si la librairie
+// qrcodejs n'a pas pu se charger (ex : pas de réseau) plutôt que de planter l'app.
+function qrCodeDataURL(text, size){
+  return new Promise((resolve)=>{
+    if(typeof window.QRCode === 'undefined'){ resolve(''); return; }
+    const holder = document.createElement('div');
+    holder.style.position = 'absolute'; holder.style.left = '-9999px'; holder.style.top = '-9999px';
+    document.body.appendChild(holder);
+    try{
+      new QRCode(holder, { text, width: size||260, height: size||260, correctLevel: QRCode.CorrectLevel.M });
+    }catch(e){ holder.remove(); resolve(''); return; }
+    setTimeout(()=>{
+      const canvas = holder.querySelector('canvas');
+      const img = holder.querySelector('img');
+      const url = canvas ? canvas.toDataURL('image/png') : (img ? img.src : '');
+      holder.remove();
+      resolve(url);
+    }, 80);
+  });
+}
+// Ouvre une petite fenêtre d'impression avec le QR code en grand, prête à coller chez le client.
+function printQrImage(dataUrl, nom, code){
+  const w = window.open('', '_blank', 'width=420,height=560');
+  if(!w){ toast("Impossible d'ouvrir la fenêtre d'impression (bloquée par le navigateur).", 'warning'); return; }
+  w.document.write(`<!doctype html><html><head><meta charset="utf-8"><title>QR code — ${escapeHtml(nom||'')}</title>
+    <style>body{font-family:sans-serif;text-align:center;padding:30px;} img{width:260px;height:260px;} h2{margin:14px 0 2px;} p{color:#666;margin:0;}</style>
+    </head><body>
+    <img src="${dataUrl}" alt="QR code">
+    <h2>${escapeHtml(nom||'')}</h2>
+    <p>${code?escapeHtml(code):''}</p>
+    <script>window.onload = function(){ setTimeout(function(){ window.print(); }, 200); };</script>
+    </body></html>`);
+  w.document.close();
+}
+// Point d'entrée quand l'URL de l'app est ouverte sur "#/qr/<clientId>" (scan du QR code
+// collé chez le client). Redirige immédiatement vers le bon flux selon le rôle de l'utilisateur
+// connecté, puis nettoie la route pour que la navigation normale (onglets, retour) reste saine.
+function handleQrScan(clientId, user){
+  const c = APP.clients.get(clientId);
+  if(!c){
+    toast("Client introuvable pour ce QR code (il a peut-être été supprimé).", 'critical');
+    setRoute(defaultRoute(user));
+    return;
+  }
+  if(user.role==='commercial'){
+    if(c.commercialId !== user.id){
+      toast("Ce client ne fait pas partie de votre portefeuille.", 'warning');
+      setRoute(defaultRoute(user));
+      return;
+    }
+    setRoute('#/tournee');
+    setTimeout(()=>openClientModal(clientId, user), 60);
+    return;
+  }
+  if(user.role==='superviseur'){
+    APP.qrPreselect = { clientId: c.id, commercialId: c.commercialId || null };
+    setRoute('#/fiche');
+    return;
+  }
+  // Direction / ADV : consultation en lecture seule depuis la base clients.
+  setRoute('#/base-clients');
+  setTimeout(()=>openClientModal(clientId, user), 60);
+}
 const SECTEURS_DATA = {
   'DAKAR 1': {chef:'ALIOUNE FALL', superviseur:'SAID BEN HADJ', zones:['DAKAR PLATEAU','REUBEUSS','MEDINA','FASS','GUEULE TAPEE','COLOBANE','FANN POINT E AMITIE','HLM OUAGOU NIAYES','NIARI TALLY BEN TALLY','DIEUPPEUL DERKLE','GRAND DAKAR','SACRE CŒUR','LIBERTE 6','SCAT URBAM','SUD FOIRE','OUEST FOIRE','GRAND YOFF','ZONE DE CAPTAGE','HLM PATTE D OIE','KHAR YALLA','MERMOZ','OUAKAM','ALMADIES','NGOR']},
   'DAKAR 2': {chef:'VIEUX SALOUM SONKO', superviseur:'SAID BEN HADJ', zones:['PATTE D\'OIE','PARCELLES ASSAINIES DE 01 A 26','NORD FOIRE','DIAMALAYE','YOFF APECSY','CAMBERENE','SOPRIM','FADIA','GOLF','GUEDIEWAYE','GADAYE','WAKHINANE NIMZAT','MEDINA GOUNASS']},
@@ -502,6 +575,10 @@ function scheduleRender(){
 }
 
 async function boot(){
+  // Reprend la route déjà présente dans l'URL au premier chargement (ex : lien d'un QR code
+  // scanné "à froid", appli pas encore ouverte) — sans ça, seul un changement de hash ultérieur
+  // (hashchange) mettait APP.route à jour, et le lien initial était perdu.
+  APP.route = location.hash || null;
   render(); // login / loading screen first
   if(!supabaseConfigured()){
     APP.configError = true;
@@ -643,6 +720,11 @@ function render(){
     wireLogin();
     return;
   }
+  if(APP.route && APP.route.indexOf('#/qr/')===0){
+    const scannedClientId = decodeURIComponent(APP.route.slice('#/qr/'.length));
+    handleQrScan(scannedClientId, user);
+    return;
+  }
   if(!APP.route || APP.route==='#/login' || !routeAllowed(user, APP.route)) APP.route = defaultRoute(user);
   root.innerHTML = renderShellHTML(user);
   wireShell(user);
@@ -725,7 +807,10 @@ function wireLogin(){
     errBox.style.display = 'none';
     APP.currentUser = p;
     saveSession(p.id);
-    setRoute(defaultRoute(p));
+    // Si la connexion a été déclenchée par un lien de QR code scanné avant d'être connecté,
+    // on conserve cette route pour être redirigé directement vers le bon client après le login.
+    const pendingQrRoute = (APP.route && APP.route.indexOf('#/qr/')===0) ? APP.route : null;
+    setRoute(pendingQrRoute || defaultRoute(p));
   });
 }
 
@@ -1101,7 +1186,7 @@ function renderJournalProspects(content, user){
 }
 
 /* ============================== CLIENT DETAIL MODAL ============================== */
-function openClientModal(clientId, user){
+function openClientModal(clientId, user, autoShowQr){
   const c = APP.clients.get(clientId);
   if(!c) return;
   const backdrop = document.createElement('div'); backdrop.className='modal-backdrop';
@@ -1126,6 +1211,15 @@ function openClientModal(clientId, user){
     <div class="modal-head">
       <div><h3>${escapeHtml(c.nom)} ${statutPillHtml}</h3><p class="page-sub">${escapeHtml(c.zone||c.secteur||'Zone non renseignée')} · ${escapeHtml(c.adresse||'')} · ${escapeHtml(c.telephone||'—')}</p></div>
       <button class="modal-close" data-close>${icon('x')}</button>
+    </div>
+
+    <div class="card" style="padding:12px 14px;">
+      <div class="card-head" style="margin-bottom:8px;">
+        <div class="card-title">QR code du client</div>
+        <button class="btn ghost sm" id="toggle-qr">${icon('camera')} Voir / Imprimer le QR code</button>
+      </div>
+      <div class="helptext">À coller chez le client : une fois scanné avec l'appareil photo du téléphone, il ouvre directement la fiche de ce client dans l'application.</div>
+      <div id="qr-box" style="display:none;margin-top:10px;"></div>
     </div>
 
     <div class="card" style="padding:12px 14px;">
@@ -1181,6 +1275,30 @@ function openClientModal(clientId, user){
   </div>`;
   document.body.appendChild(backdrop);
   backdrop.querySelector('[data-close]').addEventListener('click', ()=>backdrop.remove());
+  const toggleQrBtn = backdrop.querySelector('#toggle-qr');
+  if(toggleQrBtn) toggleQrBtn.addEventListener('click', async ()=>{
+    const qrBox = backdrop.querySelector('#qr-box');
+    const opening = qrBox.style.display === 'none';
+    qrBox.style.display = opening ? 'block' : 'none';
+    if(opening && !qrBox.getAttribute('data-ready')){
+      qrBox.innerHTML = `<span class="helptext">Génération du QR code…</span>`;
+      const url = qrUrlForClient(c.id);
+      const dataUrl = await qrCodeDataURL(url, 220);
+      if(!dataUrl){ qrBox.innerHTML = `<span class="helptext">Impossible de générer le QR code (vérifiez la connexion internet).</span>`; return; }
+      qrBox.setAttribute('data-ready', '1');
+      qrBox.innerHTML = `
+        <div style="display:flex;gap:16px;flex-wrap:wrap;align-items:flex-start;">
+          <img src="${dataUrl}" alt="QR code ${escapeHtml(c.nom)}" style="width:150px;height:150px;border:1px solid var(--border);border-radius:8px;background:#fff;padding:6px;">
+          <div style="display:flex;flex-direction:column;gap:8px;">
+            <span class="helptext" style="max-width:260px;">Client : <b>${escapeHtml(c.nom)}</b>${c.code?' · Code : '+escapeHtml(c.code):''}</span>
+            <button class="btn sm" id="qr-print">${icon('pdf')} Imprimer</button>
+            <a class="btn ghost sm" id="qr-download" download="QR-${(c.code||c.nom||'client').replace(/[^a-zA-Z0-9-_]+/g,'_')}.png" href="${dataUrl}" style="text-decoration:none;">${icon('download')} Télécharger l'image</a>
+          </div>
+        </div>`;
+      qrBox.querySelector('#qr-print').addEventListener('click', ()=>printQrImage(dataUrl, c.nom, c.code));
+    }
+  });
+  if(autoShowQr && toggleQrBtn) toggleQrBtn.click();
   const editInfosBtn = backdrop.querySelector('#edit-infos');
   if(editInfosBtn) editInfosBtn.addEventListener('click', ()=>{
     const box = backdrop.querySelector('#infos-edit-box');
@@ -1450,10 +1568,16 @@ function wireGpsCapture(box, btnSel, boxSel){
 /* ============================== FICHE DE SUIVI (SUPERVISEUR) ============================== */
 function renderFiche(content, user){
   const equipe = user.equipe || [];
+  // Préremplissage venant d'un scan de QR code chez un client (voir handleQrScan) : on le
+  // consomme une seule fois ici pour ne pas le réappliquer si l'utilisateur revient plus tard
+  // sur cette page par la navigation normale.
+  const preselect = APP.qrPreselect; APP.qrPreselect = null;
+  const preselectClient = preselect ? APP.clients.get(preselect.clientId) : null;
   let mode = 'avec';
   content.innerHTML = `
     ${demoBannerHTML()}
     <div class="page-head"><div><h1>Fiche de suivi</h1><p class="page-sub">Renseignez votre passage chez un client, avec ou sans le commercial de votre équipe.</p></div></div>
+    ${preselectClient ? `<div class="banner" style="margin-bottom:14px;max-width:720px;">${icon('camera')} Client présélectionné depuis le QR code scanné : <b>${escapeHtml(preselectClient.nom)}</b>. Confirmez simplement le mode de visite ci-dessous.</div>` : ''}
     <div class="card" style="max-width:720px;">
       <div class="chip-select" id="f-mode" style="margin-bottom:16px;">
         <div class="chip-opt on" data-mode="avec">🤝 Tournée avec le commercial</div>
@@ -1473,17 +1597,19 @@ function renderFiche(content, user){
     renderFormBody();
   }));
   function renderFormBody(){
-    if(mode==='avec') renderModeAvecCommercial(formBody, content, user, equipe);
-    else renderModeSansCommercial(formBody, content, user);
+    if(mode==='avec') renderModeAvecCommercial(formBody, content, user, equipe, preselect);
+    else renderModeSansCommercial(formBody, content, user, preselect);
   }
   renderFormBody();
   renderRecentFiches(content, user);
 }
 
-function renderModeAvecCommercial(box, content, user, equipe){
-  let commercialId = '';
+function renderModeAvecCommercial(box, content, user, equipe, preselect){
+  // Si le client scanné est pris en charge par un commercial de cette équipe, on le présélectionne
+  // directement — sinon le superviseur choisit normalement, rien ne change pour lui.
+  let commercialId = (preselect && preselect.commercialId && equipe.includes(preselect.commercialId)) ? preselect.commercialId : '';
   box.innerHTML = `
-    <label class="field">Commercial accompagné<select id="fa-commercial"><option value="">Choisir…</option>${equipe.map(id=>{const p=APP.profils.get(id);return p?`<option value="${id}">${escapeHtml(p.nom)}</option>`:'';}).join('')}</select></label>
+    <label class="field">Commercial accompagné<select id="fa-commercial"><option value="">Choisir…</option>${equipe.map(id=>{const p=APP.profils.get(id);return p?`<option value="${id}" ${id===commercialId?'selected':''}>${escapeHtml(p.nom)}</option>`:'';}).join('')}</select></label>
     <div id="fa-body" style="margin-top:12px;"></div>
   `;
   const commercialSel = box.querySelector('#fa-commercial');
@@ -1506,7 +1632,7 @@ function renderModeAvecCommercial(box, content, user, equipe){
       renderSub();
     }));
     function renderSub(){
-      if(subMode==='client') renderAvecClient(subBody, content, user, commercialId);
+      if(subMode==='client') renderAvecClient(subBody, content, user, commercialId, preselect);
       else renderAvecProspect(subBody, content, user, commercialId);
     }
     renderSub();
@@ -1514,9 +1640,11 @@ function renderModeAvecCommercial(box, content, user, equipe){
   renderBody();
 }
 
-function renderAvecClient(box, content, user, commercialId){
+function renderAvecClient(box, content, user, commercialId, preselect){
+  const clientsList = myClients(commercialId);
+  const preselectClientId = (preselect && preselect.clientId && clientsList.some(c=>c.id===preselect.clientId)) ? preselect.clientId : '';
   box.innerHTML = `
-    <label class="field">Client visité<select id="fa-client"><option value="">Choisir…</option>${myClients(commercialId).map(c=>`<option value="${c.id}">${escapeHtml(c.nom)} — ${escapeHtml(c.zone)}</option>`).join('')}</select></label>
+    <label class="field">Client visité<select id="fa-client"><option value="">Choisir…</option>${clientsList.map(c=>`<option value="${c.id}" ${c.id===preselectClientId?'selected':''}>${escapeHtml(c.nom)} — ${escapeHtml(c.zone)}</option>`).join('')}</select></label>
     <div id="fa-detect" class="gps-box" style="margin-top:12px;display:none;"></div>
     <div class="field" style="margin-top:12px;">Produits présents en rayon
       <div class="checklist-grid" id="fa-produits"></div>
@@ -1546,6 +1674,7 @@ function renderAvecClient(box, content, user, commercialId){
       : `<span class="status-pill critical">✗ Aucun passage enregistré aujourd'hui pour ce client</span>`;
     box.querySelector('#fa-verif').checked = !!v;
   });
+  if(preselectClientId) clientSel.dispatchEvent(new Event('change'));
   box.querySelector('#fa-submit').addEventListener('click', async ()=>{
     if(!APP.db) return;
     const clid = clientSel.value;
@@ -1615,7 +1744,7 @@ function renderAvecProspect(box, content, user, commercialId){
   });
 }
 
-function renderModeSansCommercial(box, content, user){
+function renderModeSansCommercial(box, content, user, preselect){
   let subMode = 'client';
   box.innerHTML = `
     <div class="banner" style="margin-bottom:14px;">Vous effectuez cette tournée seul(e) : le commercial n'est pas présent. Visitez un client existant pour relever les produits en rayon, ou prospectez un nouveau point de vente.</div>
@@ -1632,17 +1761,18 @@ function renderModeSansCommercial(box, content, user){
     renderSub();
   }));
   function renderSub(){
-    if(subMode==='client') renderSansClient(subBody, content, user);
+    if(subMode==='client') renderSansClient(subBody, content, user, preselect);
     else renderSansProspect(subBody, content, user);
   }
   renderSub();
 }
 
-function renderSansClient(box, content, user){
+function renderSansClient(box, content, user, preselect){
   const secteurs = secteursForEquipe(user);
+  const preClient = (preselect && preselect.clientId) ? APP.clients.get(preselect.clientId) : null;
   box.innerHTML = `
     <div class="form-grid">
-      <label class="field">Zone<select id="fs-zone"><option value="">Choisir…</option>${secteurs.map(s=>`<optgroup label="${escapeHtml(s)}">${zonesForSecteur(s).map(z=>`<option>${escapeHtml(z)}</option>`).join('')}</optgroup>`).join('')}</select></label>
+      <label class="field">Zone<select id="fs-zone"><option value="">Choisir…</option>${secteurs.map(s=>`<optgroup label="${escapeHtml(s)}">${zonesForSecteur(s).map(z=>`<option ${preClient && preClient.zone===z?'selected':''}>${escapeHtml(z)}</option>`).join('')}</optgroup>`).join('')}</select></label>
       <label class="field">Client<select id="fs-client"><option value="">Sélectionnez d'abord une zone…</option></select></label>
     </div>
     <div id="fs-info" class="gps-box" style="margin-top:12px;display:none;"></div>
@@ -1682,6 +1812,14 @@ function renderSansClient(box, content, user){
            : `<span class="status-pill warning">Pas de passage du commercial enregistré aujourd'hui</span>`)
       + `<br><span class="helptext">Dernier passage : ${lastVisitDate(clid)?fmtDateFR(lastVisitDate(clid)):'jamais'}</span>`;
   });
+  if(preClient && preClient.zone){
+    zoneSel.value = preClient.zone;
+    if(zoneSel.value === preClient.zone){
+      zoneSel.dispatchEvent(new Event('change'));
+      clientSel.value = preClient.id;
+      if(clientSel.value === preClient.id) clientSel.dispatchEvent(new Event('change'));
+    }
+  }
   box.querySelector('#fs-submit').addEventListener('click', async ()=>{
     if(!APP.db) return;
     const clid = clientSel.value;
@@ -2605,20 +2743,24 @@ function renderClientsDB(content, user){
         ${!isCommercial ? `<select id="filter-commercial"><option value="">Tous les commerciaux</option>${[...APP.profils.values()].filter(p=>p.role==='commercial').map(p=>`<option value="${p.id}">${escapeHtml(p.nom)}</option>`).join('')}</select>` : ''}
         <select id="filter-secteur"><option value="">Tous les secteurs</option>${SECTEUR_NAMES.map(s=>`<option>${escapeHtml(s)}</option>`).join('')}</select>
         <select id="filter-statut"><option value="">Statut : tous</option><option value="actif">Actifs</option><option value="a_valider">En attente ADV</option><option value="prospect">Prospects</option></select>
+        <button class="btn" id="clients-qr-pdf">${icon('camera')} Feuille de QR codes</button>
       </div>
     </div>
     ${isCommercial ? `<div class="banner" style="margin-bottom:14px;">Complétez le secteur (auto), la zone, le téléphone, le nombre de visites et les jours de visite de chaque client : tant qu'une information manque, il apparaît « non vérifié » ci-dessous. Cliquez sur une ligne pour compléter.</div>` : ''}
+    <div class="banner" style="margin-bottom:14px;">${icon('camera')} Chaque client a son propre QR code à coller sur son point de vente : scanné avec l'appareil photo du téléphone, il ouvre directement sa fiche dans l'application. Cliquez sur une ligne puis sur « Voir / Imprimer le QR code », ou générez une feuille groupée pour tous les clients du filtre actuel.</div>
     <div class="card"><div class="table-wrap"><table>
-      <thead><tr><th>Code</th><th>Client</th><th>Secteur</th><th>Zone</th><th>Téléphone</th><th>Jours visite</th><th>Commercial</th><th>Statut</th></tr></thead>
+      <thead><tr><th>Code</th><th>Client</th><th>Secteur</th><th>Zone</th><th>Téléphone</th><th>Jours visite</th><th>Commercial</th><th>Statut</th><th>QR</th></tr></thead>
       <tbody id="clients-tbody"></tbody>
     </table></div></div>
   `;
   wireDemoBanner(content);
+  let currentFiltered = [];
   function apply(){
     const com = content.querySelector('#filter-commercial') ? content.querySelector('#filter-commercial').value : '';
     const sec = content.querySelector('#filter-secteur').value;
     const st = content.querySelector('#filter-statut').value;
     const filtered = list.filter(c=> (!com||c.commercialId===com) && (!sec||c.secteur===sec) && (!st||c.statut===st));
+    currentFiltered = filtered;
     const tb = content.querySelector('#clients-tbody');
     tb.innerHTML = filtered.map(c=>{
       const commercial = APP.profils.get(c.commercialId);
@@ -2634,15 +2776,58 @@ function renderClientsDB(content, user){
         <td>${c.telephone?escapeHtml(c.telephone):'—'}</td>
         <td>${(c.joursVisite&&c.joursVisite.length)?c.joursVisite.join(', '):'—'}</td>
         <td>${commercial?escapeHtml(commercial.nom):'—'}</td>
-        <td>${statutPill}</td></tr>`;
-    }).join('') || `<tr><td colspan="8" class="empty-state">Aucun client pour ce filtre.</td></tr>`;
-    tb.querySelectorAll('[data-row]').forEach(r=>r.addEventListener('click', ()=>openClientModal(r.getAttribute('data-row'), user)));
+        <td>${statutPill}</td>
+        <td><button class="btn ghost sm" data-qr="${c.id}" title="Voir / imprimer le QR code">${icon('camera')}</button></td></tr>`;
+    }).join('') || `<tr><td colspan="9" class="empty-state">Aucun client pour ce filtre.</td></tr>`;
+    tb.querySelectorAll('[data-row]').forEach(r=>r.addEventListener('click', (e)=>{
+      if(e.target.closest('[data-qr]')) return;
+      openClientModal(r.getAttribute('data-row'), user);
+    }));
+    tb.querySelectorAll('[data-qr]').forEach(btn=>btn.addEventListener('click', (e)=>{
+      e.stopPropagation();
+      openClientModal(btn.getAttribute('data-qr'), user, true);
+    }));
   }
   content.querySelector('#filter-secteur').addEventListener('change', apply);
   content.querySelector('#filter-statut').addEventListener('change', apply);
   const comSel = content.querySelector('#filter-commercial');
   if(comSel) comSel.addEventListener('change', apply);
+  content.querySelector('#clients-qr-pdf').addEventListener('click', (e)=>{
+    if(!currentFiltered.length){ toast('Aucun client à inclure dans la feuille (vérifiez les filtres).', 'warning'); return; }
+    exportClientsQrPDF(currentFiltered, e.target.closest('button'));
+  });
   apply();
+}
+
+// Génère une feuille PDF imprimable avec le QR code de chaque client du lot fourni
+// (grille de vignettes nom + code + QR code), prête à découper et coller sur chaque point de vente.
+async function exportClientsQrPDF(clients, triggerBtn){
+  if(typeof window.jspdf === 'undefined'){ toast('Bibliothèque PDF non chargée. Vérifiez votre connexion.', 'critical'); return; }
+  const origLabel = triggerBtn ? triggerBtn.innerHTML : null;
+  if(triggerBtn){ triggerBtn.disabled = true; triggerBtn.textContent = 'Génération…'; }
+  try{
+    const { jsPDF } = window.jspdf;
+    const doc = new jsPDF({unit:'pt', format:'a4'});
+    const marginX = 36, marginY = 40, cols = 3, cellW = 170, cellH = 190, qrSize = 120;
+    let x = marginX, y = marginY, col = 0;
+    doc.setFont('helvetica','bold'); doc.setFontSize(14);
+    doc.text('DOXAL — Feuille de QR codes clients', marginX, 24);
+    for(const c of clients){
+      if(y + cellH > 800){ doc.addPage(); x = marginX; y = marginY; col = 0; }
+      const dataUrl = await qrCodeDataURL(qrUrlForClient(c.id), 260);
+      if(dataUrl){ try{ doc.addImage(dataUrl, 'PNG', x + (cellW-qrSize)/2, y, qrSize, qrSize); }catch(e){} }
+      doc.setFont('helvetica','bold'); doc.setFontSize(10);
+      doc.text(String(c.nom||'').slice(0,26), x + cellW/2, y + qrSize + 16, {align:'center', maxWidth: cellW-6});
+      doc.setFont('helvetica','normal'); doc.setFontSize(8.5);
+      doc.text(c.code ? String(c.code) : (c.zone||''), x + cellW/2, y + qrSize + 30, {align:'center'});
+      col++;
+      if(col>=cols){ col=0; x = marginX; y += cellH; }
+      else { x += cellW; }
+    }
+    doc.save(`doxal-qr-codes-clients-${todayISO()}.pdf`);
+    toast(`Feuille PDF générée pour ${clients.length} client(s).`, 'good');
+  }catch(e){ toast('Échec de la génération de la feuille PDF.', 'critical'); }
+  if(triggerBtn){ triggerBtn.disabled = false; triggerBtn.innerHTML = origLabel; }
 }
 
 function renderClientsCarte(content, user){
