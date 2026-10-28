@@ -314,13 +314,32 @@ function makeSupabaseDbShim(sb){
         let stopped = false;
         async function fetchAndEmit(){
           if(stopped) return;
-          let q = sb.from(name).select('id,fields');
-          if(opts.orderField) q = q.order(opts.orderField, {ascending: opts.orderDir !== 'desc'});
-          if(opts.limitN) q = q.limit(opts.limitN);
-          const { data, error } = await q;
-          if(stopped) return;
-          if(error){ if(errCb) errCb(error); return; }
-          cb({ docs: (data||[]).map(row=>({ id: row.id, data: () => (row.fields || {}) })) });
+          let rows = [];
+          if(opts.limitN){
+            let q = sb.from(name).select('id,fields');
+            if(opts.orderField) q = q.order(opts.orderField, {ascending: opts.orderDir !== 'desc'});
+            q = q.limit(opts.limitN);
+            const { data, error } = await q;
+            if(stopped) return;
+            if(error){ if(errCb) errCb(error); return; }
+            rows = data || [];
+          } else {
+            // Pas de limite explicite : on charge tout, page par page, pour éviter la limite
+            // par défaut de PostgREST (1000 lignes) qui tronquait silencieusement les
+            // collections comme clients_rtm une fois qu'elles dépassent ce seuil.
+            const PAGE = 1000;
+            let from = 0;
+            while(true){
+              let q = sb.from(name).select('id,fields').order(opts.orderField || 'id', {ascending: opts.orderDir !== 'desc'}).range(from, from + PAGE - 1);
+              const { data, error } = await q;
+              if(stopped) return;
+              if(error){ if(errCb) errCb(error); return; }
+              rows = rows.concat(data || []);
+              if(!data || data.length < PAGE) break;
+              from += PAGE;
+            }
+          }
+          cb({ docs: rows.map(row=>({ id: row.id, data: () => (row.fields || {}) })) });
         }
         fetchAndEmit();
         // Supabase Realtime livre des évènements ligne par ligne (insert/update/delete) ; par
