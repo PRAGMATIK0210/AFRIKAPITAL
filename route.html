@@ -9,6 +9,8 @@
 <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
 <!-- Génération des QR codes clients -->
 <script src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js"></script>
+<!-- Lecture des QR codes clients par la caméra (repli quand l'API native BarcodeDetector n'est pas disponible) -->
+<script src="https://cdn.jsdelivr.net/npm/jsqr@1.4.0/dist/jsQR.min.js"></script>
 <!-- Supabase (base de données partagée, en temps réel, entre tous les utilisateurs) -->
 <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
 </head>
@@ -431,6 +433,154 @@ function printQrImage(dataUrl, nom, code){
     <script>window.onload = function(){ setTimeout(function(){ window.print(); }, 200); };<\/script>
     </body></html>`);
   w.document.close();
+}
+/* ============================== SCANNER QR CODE EN DIRECT (CAMÉRA) ==============================
+   Composant réutilisable : ouvre la caméra arrière du téléphone dans une fenêtre modale et décode
+   les QR codes en continu — API native BarcodeDetector si disponible (Chrome Android), sinon la
+   librairie jsQR en repli (compatible iOS/Safari et autres navigateurs). Dès qu'un QR code d'un
+   client connu de l'application est détecté, la caméra est coupée et opts.onResult(clientId,
+   client) est appelé une seule fois. opts.validate(client) peut renvoyer true pour accepter, ou
+   une chaîne (message affiché) pour refuser et laisser l'utilisateur rescanner. Une saisie
+   manuelle du code client reste toujours disponible en repli (caméra indisponible, mauvais
+   éclairage, etc.), pour ne jamais bloquer le travail sur le terrain. */
+function openQrScanner(opts){
+  opts = opts || {};
+  let stream = null, stopped = false, rafId = null, intervalId = null, barcodeDetector = null;
+  const backdrop = document.createElement('div'); backdrop.className = 'modal-backdrop';
+  backdrop.innerHTML = `<div class="modal" style="max-width:420px;">
+    <div class="modal-head">
+      <div><h3>${icon('camera')} ${escapeHtml(opts.title || 'Scanner le QR code du client')}</h3><p class="page-sub">${escapeHtml(opts.hint || 'Visez le QR code collé chez le client.')}</p></div>
+      <button class="modal-close" data-close>${icon('x')}</button>
+    </div>
+    <div style="position:relative;border-radius:10px;overflow:hidden;background:#000;aspect-ratio:1/1;max-height:66vh;">
+      <video id="qrscan-video" playsinline muted style="width:100%;height:100%;object-fit:cover;display:block;"></video>
+      <div style="position:absolute;inset:14%;border:2px solid rgba(255,255,255,.85);border-radius:14px;pointer-events:none;box-shadow:0 0 0 2000px rgba(0,0,0,.25);"></div>
+    </div>
+    <div id="qrscan-status" class="helptext" style="margin-top:10px;min-height:18px;"></div>
+    <div style="margin-top:6px;">
+      <button class="btn ghost sm" id="qrscan-manual-toggle" type="button">Saisir le code client manuellement</button>
+      <div id="qrscan-manual-box" style="display:none;flex-direction:column;gap:8px;margin-top:8px;">
+        <input type="text" id="qrscan-manual-input" placeholder="Ex : CLTDIV1234">
+        <button class="btn primary sm" id="qrscan-manual-submit" type="button">Valider ce code</button>
+      </div>
+    </div>
+  </div>`;
+  document.body.appendChild(backdrop);
+
+  function cleanup(){
+    if(rafId) cancelAnimationFrame(rafId);
+    if(intervalId) clearInterval(intervalId);
+    if(stream){ stream.getTracks().forEach(t=>t.stop()); stream = null; }
+  }
+  function finish(clientId, client){
+    if(stopped) return;
+    stopped = true; cleanup(); backdrop.remove();
+    if(opts.onResult) opts.onResult(clientId, client);
+  }
+  function close(){
+    if(stopped) return;
+    stopped = true; cleanup(); backdrop.remove();
+    if(opts.onCancel) opts.onCancel();
+  }
+  backdrop.addEventListener('click', e=>{ if(e.target===backdrop) close(); });
+  backdrop.querySelector('[data-close]').addEventListener('click', close);
+
+  const statusBox = backdrop.querySelector('#qrscan-status');
+  function setStatus(msg, kind){
+    statusBox.textContent = msg || '';
+    statusBox.style.color = kind==='error' ? 'var(--critical)' : (kind==='warning' ? 'var(--warning)' : '');
+  }
+  const manualBox = backdrop.querySelector('#qrscan-manual-box');
+  function showManualFallback(){ manualBox.style.display = 'flex'; }
+  backdrop.querySelector('#qrscan-manual-toggle').addEventListener('click', ()=>{
+    manualBox.style.display = manualBox.style.display==='none' ? 'flex' : 'none';
+  });
+
+  function resolveClientFromText(raw){
+    let text = String(raw||'').trim();
+    const marker = '#/qr/';
+    const idx = text.indexOf(marker);
+    if(idx !== -1) text = text.slice(idx + marker.length);
+    try{ text = decodeURIComponent(text); }catch(e){}
+    return APP.clients.get(text) ? text : null;
+  }
+  function tryAccept(rawText){
+    if(stopped) return;
+    const clientId = resolveClientFromText(rawText);
+    const client = clientId ? APP.clients.get(clientId) : null;
+    if(!client){ setStatus("QR code non reconnu — ce n'est pas un client de l'application.", 'error'); return; }
+    if(opts.validate){
+      const v = opts.validate(client);
+      if(v !== true){ setStatus(typeof v==='string' ? v : "Ce client n'est pas autorisé ici.", 'error'); return; }
+    }
+    finish(clientId, client);
+  }
+  backdrop.querySelector('#qrscan-manual-submit').addEventListener('click', ()=>{
+    const code = backdrop.querySelector('#qrscan-manual-input').value.trim();
+    if(!code) return;
+    const match = [...APP.clients.values()].find(c=>(c.code||'').toLowerCase()===code.toLowerCase());
+    if(!match){ setStatus('Aucun client ne correspond à ce code.', 'error'); return; }
+    if(opts.validate){
+      const v = opts.validate(match);
+      if(v !== true){ setStatus(typeof v==='string' ? v : "Ce client n'est pas autorisé ici.", 'error'); return; }
+    }
+    finish(match.id, match);
+  });
+
+  const video = backdrop.querySelector('#qrscan-video');
+  (async ()=>{
+    if(!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia){
+      setStatus('Caméra non disponible sur cet appareil/navigateur — utilisez la saisie manuelle ci-dessous.', 'warning');
+      showManualFallback();
+      return;
+    }
+    try{
+      stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: { ideal: 'environment' } }, audio: false });
+    }catch(e){
+      setStatus('Accès à la caméra refusé ou indisponible — utilisez la saisie manuelle ci-dessous.', 'warning');
+      showManualFallback();
+      return;
+    }
+    if(stopped){ stream.getTracks().forEach(t=>t.stop()); return; }
+    video.srcObject = stream;
+    try{ await video.play(); }catch(e){}
+    setStatus('Recherche d\'un QR code…');
+
+    if('BarcodeDetector' in window){
+      try{ barcodeDetector = new window.BarcodeDetector({ formats: ['qr_code'] }); }catch(e){ barcodeDetector = null; }
+    }
+    if(barcodeDetector){
+      intervalId = setInterval(async ()=>{
+        if(stopped) return;
+        try{
+          const codes = await barcodeDetector.detect(video);
+          if(codes && codes[0] && codes[0].rawValue) tryAccept(codes[0].rawValue);
+        }catch(e){ /* image pas encore prête, on retente au prochain tick */ }
+      }, 300);
+      return;
+    }
+    if(typeof window.jsQR === 'undefined'){
+      setStatus('Impossible de charger le lecteur de QR code (réseau indisponible) — utilisez la saisie manuelle ci-dessous.', 'warning');
+      showManualFallback();
+      return;
+    }
+    const canvas = document.createElement('canvas');
+    const ctx = canvas.getContext('2d', { willReadFrequently: true });
+    function scanFrame(){
+      if(stopped) return;
+      if(video.readyState === video.HAVE_ENOUGH_DATA && video.videoWidth){
+        canvas.width = video.videoWidth; canvas.height = video.videoHeight;
+        ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+        try{
+          const img = ctx.getImageData(0, 0, canvas.width, canvas.height);
+          const code = window.jsQR(img.data, img.width, img.height, { inversionAttempts: 'dontInvert' });
+          if(code && code.data) tryAccept(code.data);
+        }catch(e){ /* ignore, on retente à la frame suivante */ }
+      }
+      rafId = requestAnimationFrame(scanFrame);
+    }
+    rafId = requestAnimationFrame(scanFrame);
+  })();
 }
 // Point d'entrée quand l'URL de l'app est ouverte sur "#/qr/<clientId>" (scan du QR code
 // collé chez le client). Redirige immédiatement vers le bon flux selon le rôle de l'utilisateur
@@ -990,7 +1140,10 @@ function renderTournee(content, user){
     <div class="page-head">
       <div><h1>Bonjour ${escapeHtml(user.nom.split(' ')[0])} 👋</h1>
         <p class="page-sub">${todayWeekdayFR()} · votre espace commercial</p></div>
-      <button class="btn" id="go-historique">${icon('history')} Historique de mes tournées</button>
+      <div style="display:flex;gap:8px;flex-wrap:wrap;">
+        <button class="btn primary" id="go-scan">${icon('camera')} Scanner un client</button>
+        <button class="btn" id="go-historique">${icon('history')} Historique de mes tournées</button>
+      </div>
     </div>
     <div class="chip-select" id="t-tabs" style="margin-bottom:16px;max-width:440px;">
       <div class="chip-opt on" data-tab="jour">📍 Aujourd'hui</div>
@@ -1001,6 +1154,15 @@ function renderTournee(content, user){
   wireDemoBanner(content);
   const goHist = content.querySelector('#go-historique');
   if(goHist) goHist.addEventListener('click', ()=>setRoute('#/historique'));
+  const goScan = content.querySelector('#go-scan');
+  if(goScan) goScan.addEventListener('click', ()=>{
+    openQrScanner({
+      title: 'Scanner le QR code du client',
+      hint: 'Visez le QR code collé chez le client pour ouvrir directement sa fiche.',
+      validate: (c)=> c.commercialId===user.id ? true : "Ce client ne fait pas partie de votre portefeuille.",
+      onResult: (clientId)=> openClientModal(clientId, user),
+    });
+  });
   const body = content.querySelector('#t-body');
   content.querySelectorAll('#t-tabs [data-tab]').forEach(chip=>chip.addEventListener('click', ()=>{
     tab = chip.getAttribute('data-tab');
@@ -1660,58 +1822,89 @@ function renderModeAvecCommercial(box, content, user, equipe, preselect){
 }
 
 function renderAvecClient(box, content, user, commercialId, preselect){
-  const clientsList = myClients(commercialId);
-  const preselectClientId = (preselect && preselect.clientId && clientsList.some(c=>c.id===preselect.clientId)) ? preselect.clientId : '';
-  box.innerHTML = `
-    <label class="field">Client visité<select id="fa-client"><option value="">Choisir…</option>${clientsList.map(c=>`<option value="${c.id}" ${c.id===preselectClientId?'selected':''}>${escapeHtml(c.nom)} — ${escapeHtml(c.zone)}</option>`).join('')}</select></label>
-    <div id="fa-detect" class="gps-box" style="margin-top:12px;display:none;"></div>
-    <div class="field" style="margin-top:12px;">Produits présents en rayon
-      <div class="checklist-grid" id="fa-produits"></div>
-    </div>
-    <div class="checkbox-row" style="margin-top:12px;"><input type="checkbox" id="fa-verif"><label for="fa-verif">Je confirme la présence du commercial (vérification manuelle)</label></div>
-    <div class="field" style="margin-top:12px;">Concurrence identifiée en boutique
-      <div class="checklist-grid" id="fa-concurrents"></div>
-      <input type="text" id="fa-concurrence-autre" placeholder="Autre concurrent / précision libre" style="margin-top:6px;">
-    </div>
-    <div class="divider"></div>
-    <label class="field">Notes<textarea id="fa-notes" placeholder="Observations libres…"></textarea></label>
-    <div class="gps-box" style="margin-top:12px;" id="fa-gps">Aucune position capturée. <button class="btn sm" id="fa-gps-btn">${icon('pin')} Capturer ma position</button></div>
-    <button class="btn primary" id="fa-submit" style="margin-top:16px;width:100%;justify-content:center;">Enregistrer la fiche</button>
-  `;
-  const chosenProduits = buildProduitsChecklist(box.querySelector('#fa-produits'));
-  const chosenConcurrents = buildConcurrentsChecklist(box.querySelector('#fa-concurrents'));
-  const gps = wireGpsCapture(box, '#fa-gps-btn', '#fa-gps');
-  const clientSel = box.querySelector('#fa-client');
-  clientSel.addEventListener('change', ()=>{
-    const cid = clientSel.value;
-    const dbox = box.querySelector('#fa-detect');
-    if(!cid){ dbox.style.display='none'; return; }
-    const v = visiteToday(cid, commercialId);
-    dbox.style.display='block';
-    dbox.innerHTML = v
-      ? `<span class="status-pill good">✓ Passage confirmé aujourd'hui</span> à ${fmtDateTimeFR(v.timestamp).split(' ')[1]||''}${v.gps?' · position à '+v.gps.distanceM+' m':''}`
-      : `<span class="status-pill critical">✗ Aucun passage enregistré aujourd'hui pour ce client</span>`;
-    box.querySelector('#fa-verif').checked = !!v;
-  });
-  if(preselectClientId) clientSel.dispatchEvent(new Event('change'));
-  box.querySelector('#fa-submit').addEventListener('click', async ()=>{
-    if(!APP.db) return;
-    const clid = clientSel.value;
-    if(!clid){ toast('Choisissez un client.', 'warning'); return; }
-    const btn = box.querySelector('#fa-submit'); btn.disabled=true; btn.textContent='Enregistrement…';
-    const payload = {
-      superviseurId: user.id, commercialId, clientId: clid, date: todayISO(), modeVisite:'avec_commercial',
-      produitsPresents: [...chosenProduits], commercialVerifie: box.querySelector('#fa-verif').checked,
-      concurrence: [...chosenConcurrents, box.querySelector('#fa-concurrence-autre').value.trim()].filter(Boolean).join(', '),
-      clientsProspectes: [], nouveauxClients: [],
-      notes: box.querySelector('#fa-notes').value.trim(), gps: gps.value,
-    };
-    try{
-      await APP.db.collection('fichesSuperviseur').add(payload);
-      toast('Fiche enregistrée.', 'good');
-      renderFiche(content, user);
-    }catch(e){ toast('Échec de l\'enregistrement.', 'critical'); btn.disabled=false; btn.textContent='Enregistrer la fiche'; }
-  });
+  // Plus de liste déroulante : le superviseur scanne directement le QR code collé chez le
+  // client. Une présélection venant d'un scan externe (#/qr/<id>, caméra native) est acceptée
+  // telle quelle si elle appartient bien au portefeuille du commercial accompagné.
+  let selected = null;
+  if(preselect && preselect.clientId){
+    const c = APP.clients.get(preselect.clientId);
+    if(c && c.commercialId===commercialId) selected = c;
+  }
+  box.innerHTML = `<div id="fa-client-box"></div><div id="fa-rest" style="display:none;"></div>`;
+  renderClientBox();
+  if(selected) renderRest();
+
+  function renderClientBox(){
+    const cb = box.querySelector('#fa-client-box');
+    if(selected){
+      cb.innerHTML = `<div class="banner" style="display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap;">
+        <span>${icon('camera')} Client : <b>${escapeHtml(selected.nom)}</b> — ${escapeHtml(selected.zone||selected.secteur||'')}</span>
+        <button class="btn ghost sm" id="fa-rescan" type="button">Changer</button>
+      </div>`;
+      cb.querySelector('#fa-rescan').addEventListener('click', ()=>{
+        selected = null; renderClientBox();
+        const rest = box.querySelector('#fa-rest'); rest.style.display='none'; rest.innerHTML='';
+      });
+    } else {
+      cb.innerHTML = `<div class="empty-state" style="text-align:center;padding:24px 16px;">
+        <div style="margin-bottom:10px;">${icon('camera')}</div>
+        <div style="margin-bottom:12px;">Scannez le QR code collé chez le client pour continuer.</div>
+        <button class="btn primary" id="fa-scan" type="button">${icon('camera')} Scanner le QR code du client</button>
+      </div>`;
+      cb.querySelector('#fa-scan').addEventListener('click', ()=>{
+        openQrScanner({
+          title: 'Scanner le QR code du client',
+          hint: `Client accompagné : ${(APP.profils.get(commercialId)||{}).nom||''}`,
+          validate: (c)=> c.commercialId===commercialId ? true : 'Ce client ne fait pas partie du portefeuille de ce commercial.',
+          onResult: (clientId, client)=>{ selected = client; renderClientBox(); renderRest(); },
+        });
+      });
+    }
+  }
+
+  function renderRest(){
+    const rest = box.querySelector('#fa-rest');
+    rest.style.display = 'block';
+    const c = selected;
+    const v = visiteToday(c.id, commercialId);
+    rest.innerHTML = `
+      <div id="fa-detect" class="gps-box" style="margin-top:12px;">
+        ${v ? `<span class="status-pill good">✓ Passage confirmé aujourd'hui</span> à ${fmtDateTimeFR(v.timestamp).split(' ')[1]||''}${v.gps?' · position à '+v.gps.distanceM+' m':''}`
+            : `<span class="status-pill critical">✗ Aucun passage enregistré aujourd'hui pour ce client</span>`}
+      </div>
+      <div class="field" style="margin-top:12px;">Produits présents en rayon
+        <div class="checklist-grid" id="fa-produits"></div>
+      </div>
+      <div class="checkbox-row" style="margin-top:12px;"><input type="checkbox" id="fa-verif" ${v?'checked':''}><label for="fa-verif">Je confirme la présence du commercial (vérification manuelle)</label></div>
+      <div class="field" style="margin-top:12px;">Concurrence identifiée en boutique
+        <div class="checklist-grid" id="fa-concurrents"></div>
+        <input type="text" id="fa-concurrence-autre" placeholder="Autre concurrent / précision libre" style="margin-top:6px;">
+      </div>
+      <div class="divider"></div>
+      <label class="field">Notes<textarea id="fa-notes" placeholder="Observations libres…"></textarea></label>
+      <div class="gps-box" style="margin-top:12px;" id="fa-gps">Aucune position capturée. <button class="btn sm" id="fa-gps-btn">${icon('pin')} Capturer ma position</button></div>
+      <button class="btn primary" id="fa-submit" style="margin-top:16px;width:100%;justify-content:center;">Enregistrer la fiche</button>
+    `;
+    const chosenProduits = buildProduitsChecklist(rest.querySelector('#fa-produits'));
+    const chosenConcurrents = buildConcurrentsChecklist(rest.querySelector('#fa-concurrents'));
+    const gps = wireGpsCapture(rest, '#fa-gps-btn', '#fa-gps');
+    rest.querySelector('#fa-submit').addEventListener('click', async ()=>{
+      if(!APP.db) return;
+      const btn = rest.querySelector('#fa-submit'); btn.disabled=true; btn.textContent='Enregistrement…';
+      const payload = {
+        superviseurId: user.id, commercialId, clientId: c.id, date: todayISO(), modeVisite:'avec_commercial',
+        produitsPresents: [...chosenProduits], commercialVerifie: rest.querySelector('#fa-verif').checked,
+        concurrence: [...chosenConcurrents, rest.querySelector('#fa-concurrence-autre').value.trim()].filter(Boolean).join(', '),
+        clientsProspectes: [], nouveauxClients: [],
+        notes: rest.querySelector('#fa-notes').value.trim(), gps: gps.value,
+      };
+      try{
+        await APP.db.collection('fichesSuperviseur').add(payload);
+        toast('Fiche enregistrée.', 'good');
+        renderFiche(content, user);
+      }catch(e){ toast('Échec de l\'enregistrement.', 'critical'); btn.disabled=false; btn.textContent='Enregistrer la fiche'; }
+    });
+  }
 }
 
 function renderAvecProspect(box, content, user, commercialId){
@@ -1787,78 +1980,88 @@ function renderModeSansCommercial(box, content, user, preselect){
 }
 
 function renderSansClient(box, content, user, preselect){
-  const secteurs = secteursForEquipe(user);
-  const preClient = (preselect && preselect.clientId) ? APP.clients.get(preselect.clientId) : null;
-  box.innerHTML = `
-    <div class="form-grid">
-      <label class="field">Zone<select id="fs-zone"><option value="">Choisir…</option>${secteurs.map(s=>`<optgroup label="${escapeHtml(s)}">${zonesForSecteur(s).map(z=>`<option ${preClient && preClient.zone===z?'selected':''}>${escapeHtml(z)}</option>`).join('')}</optgroup>`).join('')}</select></label>
-      <label class="field">Client<select id="fs-client"><option value="">Sélectionnez d'abord une zone…</option></select></label>
-    </div>
-    <div id="fs-info" class="gps-box" style="margin-top:12px;display:none;"></div>
-    <div class="field" style="margin-top:12px;">Produits présents en rayon
-      <div class="checklist-grid" id="fs-produits"></div>
-    </div>
-    <div class="field" style="margin-top:12px;">Concurrence identifiée en boutique
-      <div class="checklist-grid" id="fs-concurrents"></div>
-      <input type="text" id="fs-concurrence-autre" placeholder="Autre concurrent / précision libre" style="margin-top:6px;">
-    </div>
-    <div class="divider"></div>
-    <label class="field">Notes<textarea id="fs-notes" placeholder="Observations libres…"></textarea></label>
-    <div class="gps-box" style="margin-top:12px;" id="fs-gps">Aucune position capturée. <button class="btn sm" id="fs-gps-btn">${icon('pin')} Capturer ma position</button></div>
-    <button class="btn primary" id="fs-submit" style="margin-top:16px;width:100%;justify-content:center;">Enregistrer la fiche</button>
-  `;
-  const chosenProduits = buildProduitsChecklist(box.querySelector('#fs-produits'));
-  const chosenConcurrents = buildConcurrentsChecklist(box.querySelector('#fs-concurrents'));
-  const gps = wireGpsCapture(box, '#fs-gps-btn', '#fs-gps');
-  const zoneSel = box.querySelector('#fs-zone');
-  const clientSel = box.querySelector('#fs-client');
-  zoneSel.addEventListener('change', ()=>{
-    const zone = zoneSel.value;
-    const opts = [...APP.clients.values()].filter(c=>c.zone===zone && c.statut==='actif');
-    clientSel.innerHTML = `<option value="">Choisir un client…</option>` + opts.map(c=>`<option value="${c.id}">${escapeHtml(c.nom)}</option>`).join('');
-    box.querySelector('#fs-info').style.display='none';
-  });
-  clientSel.addEventListener('change', ()=>{
-    const clid = clientSel.value;
-    const infoBox = box.querySelector('#fs-info');
-    if(!clid){ infoBox.style.display='none'; return; }
-    const c = APP.clients.get(clid);
-    const commercial = APP.profils.get(c.commercialId);
-    const v = visiteToday(clid, c.commercialId);
-    infoBox.style.display='block';
-    infoBox.innerHTML = `Commercial en charge : <b>${commercial?escapeHtml(commercial.nom):'non assigné'}</b><br>`
-      + (v ? `<span class="status-pill good">✓ Le commercial est passé aujourd'hui</span> à ${fmtDateTimeFR(v.timestamp).split(' ')[1]||''}`
-           : `<span class="status-pill warning">Pas de passage du commercial enregistré aujourd'hui</span>`)
-      + `<br><span class="helptext">Dernier passage : ${lastVisitDate(clid)?fmtDateFR(lastVisitDate(clid)):'jamais'}</span>`;
-  });
-  if(preClient && preClient.zone){
-    zoneSel.value = preClient.zone;
-    if(zoneSel.value === preClient.zone){
-      zoneSel.dispatchEvent(new Event('change'));
-      clientSel.value = preClient.id;
-      if(clientSel.value === preClient.id) clientSel.dispatchEvent(new Event('change'));
+  // Plus de liste déroulante (zone + client) : le superviseur scanne directement le QR code
+  // collé chez le client, ce qui identifie exactement le point de vente sans avoir à chercher
+  // sa zone au préalable.
+  let selected = (preselect && preselect.clientId) ? (APP.clients.get(preselect.clientId) || null) : null;
+  box.innerHTML = `<div id="fs-client-box"></div><div id="fs-rest" style="display:none;"></div>`;
+  renderClientBox();
+  if(selected) renderRest();
+
+  function renderClientBox(){
+    const cb = box.querySelector('#fs-client-box');
+    if(selected){
+      const commercial = APP.profils.get(selected.commercialId);
+      cb.innerHTML = `<div class="banner" style="display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap;">
+        <span>${icon('camera')} Client : <b>${escapeHtml(selected.nom)}</b> — ${escapeHtml(selected.zone||selected.secteur||'')}${commercial?' · commercial en charge : '+escapeHtml(commercial.nom):''}</span>
+        <button class="btn ghost sm" id="fs-rescan" type="button">Changer</button>
+      </div>`;
+      cb.querySelector('#fs-rescan').addEventListener('click', ()=>{
+        selected = null; renderClientBox();
+        const rest = box.querySelector('#fs-rest'); rest.style.display='none'; rest.innerHTML='';
+      });
+    } else {
+      cb.innerHTML = `<div class="empty-state" style="text-align:center;padding:24px 16px;">
+        <div style="margin-bottom:10px;">${icon('camera')}</div>
+        <div style="margin-bottom:12px;">Scannez le QR code collé chez le client pour continuer.</div>
+        <button class="btn primary" id="fs-scan" type="button">${icon('camera')} Scanner le QR code du client</button>
+      </div>`;
+      cb.querySelector('#fs-scan').addEventListener('click', ()=>{
+        openQrScanner({
+          title: 'Scanner le QR code du client',
+          validate: (c)=> c.statut==='actif' ? true : "Ce client n'est pas actif (prospect ou en attente de validation).",
+          onResult: (clientId, client)=>{ selected = client; renderClientBox(); renderRest(); },
+        });
+      });
     }
   }
-  box.querySelector('#fs-submit').addEventListener('click', async ()=>{
-    if(!APP.db) return;
-    const clid = clientSel.value;
-    if(!clid){ toast('Choisissez un client.', 'warning'); return; }
-    const c = APP.clients.get(clid);
-    const btn = box.querySelector('#fs-submit'); btn.disabled=true; btn.textContent='Enregistrement…';
-    const v = visiteToday(clid, c.commercialId);
-    const payload = {
-      superviseurId: user.id, commercialId: c.commercialId || null, clientId: clid, date: todayISO(), modeVisite:'seul',
-      produitsPresents: [...chosenProduits], commercialVerifie: !!v,
-      concurrence: [...chosenConcurrents, box.querySelector('#fs-concurrence-autre').value.trim()].filter(Boolean).join(', '),
-      clientsProspectes: [], nouveauxClients: [],
-      notes: box.querySelector('#fs-notes').value.trim(), gps: gps.value,
-    };
-    try{
-      await APP.db.collection('fichesSuperviseur').add(payload);
-      toast('Fiche enregistrée.', 'good');
-      renderFiche(content, user);
-    }catch(e){ toast('Échec de l\'enregistrement.', 'critical'); btn.disabled=false; btn.textContent='Enregistrer la fiche'; }
-  });
+
+  function renderRest(){
+    const rest = box.querySelector('#fs-rest');
+    rest.style.display = 'block';
+    const c = selected;
+    const commercial = APP.profils.get(c.commercialId);
+    const v = visiteToday(c.id, c.commercialId);
+    rest.innerHTML = `
+      <div id="fs-info" class="gps-box" style="margin-top:12px;">
+        Commercial en charge : <b>${commercial?escapeHtml(commercial.nom):'non assigné'}</b><br>
+        ${v ? `<span class="status-pill good">✓ Le commercial est passé aujourd'hui</span> à ${fmtDateTimeFR(v.timestamp).split(' ')[1]||''}`
+            : `<span class="status-pill warning">Pas de passage du commercial enregistré aujourd'hui</span>`}
+        <br><span class="helptext">Dernier passage : ${lastVisitDate(c.id)?fmtDateFR(lastVisitDate(c.id)):'jamais'}</span>
+      </div>
+      <div class="field" style="margin-top:12px;">Produits présents en rayon
+        <div class="checklist-grid" id="fs-produits"></div>
+      </div>
+      <div class="field" style="margin-top:12px;">Concurrence identifiée en boutique
+        <div class="checklist-grid" id="fs-concurrents"></div>
+        <input type="text" id="fs-concurrence-autre" placeholder="Autre concurrent / précision libre" style="margin-top:6px;">
+      </div>
+      <div class="divider"></div>
+      <label class="field">Notes<textarea id="fs-notes" placeholder="Observations libres…"></textarea></label>
+      <div class="gps-box" style="margin-top:12px;" id="fs-gps">Aucune position capturée. <button class="btn sm" id="fs-gps-btn">${icon('pin')} Capturer ma position</button></div>
+      <button class="btn primary" id="fs-submit" style="margin-top:16px;width:100%;justify-content:center;">Enregistrer la fiche</button>
+    `;
+    const chosenProduits = buildProduitsChecklist(rest.querySelector('#fs-produits'));
+    const chosenConcurrents = buildConcurrentsChecklist(rest.querySelector('#fs-concurrents'));
+    const gps = wireGpsCapture(rest, '#fs-gps-btn', '#fs-gps');
+    rest.querySelector('#fs-submit').addEventListener('click', async ()=>{
+      if(!APP.db) return;
+      const btn = rest.querySelector('#fs-submit'); btn.disabled=true; btn.textContent='Enregistrement…';
+      const vNow = visiteToday(c.id, c.commercialId);
+      const payload = {
+        superviseurId: user.id, commercialId: c.commercialId || null, clientId: c.id, date: todayISO(), modeVisite:'seul',
+        produitsPresents: [...chosenProduits], commercialVerifie: !!vNow,
+        concurrence: [...chosenConcurrents, rest.querySelector('#fs-concurrence-autre').value.trim()].filter(Boolean).join(', '),
+        clientsProspectes: [], nouveauxClients: [],
+        notes: rest.querySelector('#fs-notes').value.trim(), gps: gps.value,
+      };
+      try{
+        await APP.db.collection('fichesSuperviseur').add(payload);
+        toast('Fiche enregistrée.', 'good');
+        renderFiche(content, user);
+      }catch(e){ toast('Échec de l\'enregistrement.', 'critical'); btn.disabled=false; btn.textContent='Enregistrer la fiche'; }
+    });
+  }
 }
 
 function renderSansProspect(box, content, user){
